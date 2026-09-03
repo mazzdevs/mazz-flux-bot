@@ -143,28 +143,15 @@ setInterval(renderCountdown, 1000);
 
 const VAPE_DASHBOARD_URL = "https://vape.stable.dexus.io";
 
-async function loadInstanceLinks(p) {
+function loadInstanceLinks(p) {
   const linksEl = document.getElementById("ov-instance-links");
   const linksRow = document.getElementById("ov-instance-links-row");
-  const renameRow = document.getElementById("ov-instance-rename-row");
   if (!p.vape_instance_id) {
     linksRow.style.display = "none";
-    renameRow.style.display = "none";
     return;
   }
   linksRow.style.display = "";
-  renameRow.style.display = "";
-  try {
-    const { instance } = await api(`/api/instances/${p.vape_instance_id}`);
-    const urls = instance?.urls || [];
-    const items = [
-      `<li><a href="${VAPE_DASHBOARD_URL}/instances/${escapeHtml(p.vape_instance_id)}" target="_blank" rel="noopener"><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> vape dashboard</a></li>`,
-      ...urls.map((u) => `<li><a href="${escapeHtml(u)}" target="_blank" rel="noopener"><svg class="icon"><use href="/icons.svg#icon-send"></use></svg> ${escapeHtml(u)}</a></li>`),
-    ];
-    linksEl.innerHTML = items.join("");
-  } catch (e) {
-    linksEl.innerHTML = `<li class="empty">failed to load instance links: ${escapeHtml(e.message)}</li>`;
-  }
+  linksEl.innerHTML = `<li><a href="${VAPE_DASHBOARD_URL}/instances/${escapeHtml(p.vape_instance_id)}" target="_blank" rel="noopener"><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> flux instance</a></li>`;
 }
 
 async function loadInstanceStatus(p) {
@@ -339,24 +326,6 @@ document.getElementById("interval-form").addEventListener("submit", async (ev) =
     await tick();
   } catch (e) {
     alert(e.message);
-  }
-});
-
-document.getElementById("instance-rename-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const input = document.getElementById("instance-rename-input");
-  const statusEl = document.getElementById("instance-rename-status");
-  const name = input.value.trim();
-  if (!name) return;
-  try {
-    await api(`/api/projects/${projectId}/instance/rename`, { method: "POST", body: JSON.stringify({ name }) });
-    statusEl.textContent = "renamed";
-    statusEl.classList.remove("error");
-    input.value = "";
-    await tick();
-  } catch (e) {
-    statusEl.textContent = e.message;
-    statusEl.classList.add("error");
   }
 });
 
