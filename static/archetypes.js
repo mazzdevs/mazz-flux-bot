@@ -9,6 +9,15 @@
   const dialog = document.getElementById("archetype-dialog");
   const form = document.getElementById("archetype-form");
   const dialogTitle = document.getElementById("archetype-dialog-title");
+  const dialogDescription = document.getElementById("archetype-dialog-description");
+  const modeBadge = document.getElementById("archetype-mode-badge");
+  const nameInput = document.getElementById("archetype-name");
+  const modelInput = document.getElementById("archetype-model");
+  const descriptionInput = document.getElementById("archetype-description");
+  const slugInput = document.getElementById("archetype-slug");
+  const submitButton = document.getElementById("archetype-submit");
+  const submitLabel = document.getElementById("archetype-submit-label");
+  const submitIcon = submitButton.querySelector("use");
 
   function escapeHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -64,6 +73,31 @@
     }
   }
 
+  function openDialog(mode, archetype) {
+    const editing = mode === "edit";
+    dialog.dataset.mode = mode;
+    dialogTitle.textContent = editing ? "Edit archetype" : "New archetype";
+    dialogDescription.textContent = editing
+      ? `Update how the conductor uses ${archetype.name} for future work.`
+      : "Define a reusable specialist the conductor can recommend for focused work.";
+    modeBadge.textContent = editing ? "Editing" : "Create";
+    submitLabel.textContent = editing ? "Save changes" : "Create archetype";
+    submitIcon.setAttribute("href", editing ? "/icons.svg#icon-check" : "/icons.svg#icon-plus");
+
+    if (editing) {
+      slugInput.value = archetype.slug;
+      nameInput.value = archetype.name;
+      modelInput.value = archetype.preferred_model;
+      descriptionInput.value = archetype.description;
+    } else {
+      form.reset();
+      slugInput.value = "";
+    }
+
+    dialog.showModal();
+    requestAnimationFrame(() => nameInput.focus());
+  }
+
   document.querySelectorAll("#archetypes-body, #archetypes-tiles").forEach((el) => {
     el.addEventListener("click", async (ev) => {
       const editBtn = ev.target.closest("button[data-edit]");
@@ -71,12 +105,7 @@
       if (editBtn) {
         const a = cache.find((x) => x.slug === editBtn.dataset.edit);
         if (!a) return;
-        dialogTitle.textContent = "Edit archetype";
-        document.getElementById("archetype-slug").value = a.slug;
-        document.getElementById("archetype-name").value = a.name;
-        document.getElementById("archetype-model").value = a.preferred_model;
-        document.getElementById("archetype-description").value = a.description;
-        dialog.showModal();
+        openDialog("edit", a);
       } else if (deleteBtn) {
         if (!confirm(`Delete archetype "${deleteBtn.dataset.delete}"?`)) return;
         try {
@@ -89,20 +118,21 @@
     });
   });
 
-  document.getElementById("archetype-create-toggle").addEventListener("click", () => {
-    dialogTitle.textContent = "New archetype";
-    form.reset();
-    document.getElementById("archetype-slug").value = "";
-    dialog.showModal();
-  });
+  document.getElementById("archetype-create-toggle").addEventListener("click", () => openDialog("create"));
   document.getElementById("archetype-close").addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (ev) => {
+    if (ev.target === dialog) dialog.close();
+  });
 
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const slug = document.getElementById("archetype-slug").value;
-    const name = document.getElementById("archetype-name").value.trim();
-    const preferred_model = document.getElementById("archetype-model").value.trim();
-    const description = document.getElementById("archetype-description").value.trim();
+    const slug = slugInput.value;
+    const name = nameInput.value.trim();
+    const preferred_model = modelInput.value.trim();
+    const description = descriptionInput.value.trim();
+    const idleLabel = slug ? "Save changes" : "Create archetype";
+    submitButton.disabled = true;
+    submitLabel.textContent = slug ? "Saving changes…" : "Creating…";
     try {
       if (slug) {
         await api(`/api/archetypes/${slug}`, { method: "POST", body: JSON.stringify({ name, description, preferred_model }) });
@@ -115,6 +145,9 @@
       await load();
     } catch (e) {
       alert(e.message);
+    } finally {
+      submitButton.disabled = false;
+      submitLabel.textContent = idleLabel;
     }
   });
 
