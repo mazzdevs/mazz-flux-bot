@@ -43,15 +43,23 @@ const DEFAULT_INTERVAL_SECS: u64 = 60;
 pub struct Decision {
     #[serde(default)]
     pub action: String,
+    /// For `send_message`: the steering text. For `create_human_task`: the
+    /// description of what a human needs to do.
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// Optional markdown note to persist to this project's notes regardless
+    /// of `action` — a passive record-keeping side channel, not mutually
+    /// exclusive with any decision (the conductor can e.g. `wait` and still
+    /// jot down what it found). See `ProjectNote`.
+    #[serde(default)]
+    pub add_note: Option<String>,
 }
 
 impl Decision {
     fn wait(note: impl Into<String>) -> Self {
-        Decision { action: "wait".to_string(), message: None, note: Some(note.into()) }
+        Decision { action: "wait".to_string(), message: None, note: Some(note.into()), add_note: None }
     }
 }
 
@@ -62,7 +70,7 @@ impl Decision {
 /// as license to act) and it's exactly what the `spice_framework` behavioral
 /// tests in `tests/heartbeat_conductor.rs` exercise directly, with no live LLM
 /// call needed.
-const KNOWN_ACTIONS: [&str; 4] = ["wait", "send_message", "mark_done", "mark_error"];
+const KNOWN_ACTIONS: [&str; 5] = ["wait", "send_message", "mark_done", "mark_error", "create_human_task"];
 
 pub fn parse_conductor_response(raw: &str) -> Decision {
     match serde_json::from_str::<Decision>(strip_markdown_fence(raw.trim())) {
@@ -87,11 +95,18 @@ const SYSTEM_PROMPT: &str = "You are an autonomous orchestrator managing a singl
     instance on behalf of a developer, working toward one stated goal. Each tick you see \
     the instance's current status and the most recent chat turns. Respond with ONLY a JSON \
     object (no markdown fences, no prose) of the shape: \
-    {\"action\": \"wait\" | \"send_message\" | \"mark_done\" | \"mark_error\", \
-    \"message\": \"<only for send_message>\", \"note\": \"<short human-readable reason>\"}. \
+    {\"action\": \"wait\" | \"send_message\" | \"mark_done\" | \"mark_error\" | \"create_human_task\", \
+    \"message\": \"<only for send_message (steering text) or create_human_task (what the human needs to do)>\", \
+    \"note\": \"<short human-readable reason>\", \
+    \"add_note\": \"<optional markdown, any action — your own running notes on this project>\"}. \
     Use send_message to steer the agent or answer a pending question in prose. Use mark_done \
     only when the transcript clearly shows the goal is achieved. Use mark_error only when the \
-    agent is stuck in a way a message can't fix. Prefer wait when unsure.";
+    agent is stuck in a way a message can't fix. Use create_human_task when you hit a blocker \
+    only a person can resolve — missing credentials/access, an ambiguous decision outside your \
+    authority, something requiring approval — this pauses the project until a person resolves \
+    it, so don't use it for things you could instead ask the agent about via send_message. Use \
+    add_note on any tick (including wait) to record findings, context, or progress worth \
+    keeping — it does not change what action is taken. Prefer wait when unsure.";
 
 #[derive(Debug, Clone)]
 pub(crate) enum TickOutcome {
@@ -99,6 +114,8 @@ pub(crate) enum TickOutcome {
     Sent(String),
     Done,
     Error,
+    /// Carries the human task description — see `ActNode`.
+    Blocked(String),
 }
 
 /// Per-tick graph state. One of these is built fresh from a `Project` DB row
@@ -116,6 +133,7 @@ pub(crate) struct HeartbeatState {
     decision: Option<Decision>,
     outcome: Option<TickOutcome>,
     note: Option<String>,
+    add_note: Option<String>,
 }
 
 pub(crate) enum Update {
@@ -123,7 +141,7 @@ pub(crate) enum Update {
     InstanceCreated(String),
     StatusFetched { harness: String, pida_status: Option<PidaStatus>, messages: Vec<serde_json::Value> },
     Decided(Decision),
-    ActionTaken(TickOutcome, Option<String>),
+    ActionTaken(TickOutcome, Option<String>, Option<String>),
     Noted(String),
 }
 
@@ -139,9 +157,10 @@ impl Reducer for HeartbeatState {
                 self.recent_messages = messages;
             }
             Update::Decided(d) => self.decision = Some(d),
-            Update::ActionTaken(outcome, note) => {
+            Update::ActionTaken(outcome, note, add_note) => {
                 self.outcome = Some(outcome);
                 self.note = note;
+                self.add_note = add_note;
             }
             Update::Noted(note) => self.note = Some(note),
         }
@@ -278,23 +297,30 @@ impl Node<HeartbeatState> for ActNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
         let decision = state.decision.clone().unwrap_or_else(|| Decision::wait("act reached with no decision"));
 
+        let note = decision.note.clone();
+        let add_note = decision.add_note.clone();
+
         match decision.action.as_str() {
             "send_message" => {
                 let message = decision.message.clone().unwrap_or_default();
                 if message.is_empty() {
                     warn!(project_id = %state.project_id, "conductor said send_message with no message body — treating as wait");
-                    return Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, decision.note.clone())));
+                    return Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, note, add_note)));
                 }
                 let instance_id = state.vape_instance_id.as_deref().ok_or_else(|| GraphError::Node {
                     node: "act".to_string(),
                     message: "send_message with no instance id".to_string(),
                 })?;
                 self.vape.pida_send(instance_id, &message).await.map_err(node_err("act"))?;
-                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Sent(message), decision.note.clone())))
+                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Sent(message), note, add_note)))
             }
-            "mark_done" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Done, decision.note.clone()))),
-            "mark_error" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Error, decision.note.clone()))),
-            _ => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, decision.note.clone()))),
+            "mark_done" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Done, note, add_note))),
+            "mark_error" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Error, note, add_note))),
+            "create_human_task" => {
+                let description = decision.message.clone().unwrap_or_else(|| note.clone().unwrap_or_else(|| "conductor requested human intervention".to_string()));
+                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Blocked(description), note, add_note)))
+            }
+            _ => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, note, add_note))),
         }
     }
 }
@@ -378,6 +404,7 @@ async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, 
         decision: None,
         outcome: None,
         note: None,
+        add_note: None,
     };
 
     match executor.run(initial, &project.id).await? {
@@ -423,6 +450,15 @@ async fn persist_tick(state: &AppState, project: &Project, final_state: &Heartbe
     }
 
     let instance_id = project.vape_instance_id.as_deref();
+
+    // Persisted regardless of which action was taken — see Decision::add_note.
+    if let Some(note_md) = &final_state.add_note {
+        if !note_md.is_empty() {
+            db::add_project_note(&state.db, &project.id, note_md).await?;
+            db::log_action(&state.db, Some(&project.id), instance_id, "add_note", None, Some(&format!("{} chars", note_md.len())), None).await?;
+        }
+    }
+
     match &final_state.outcome {
         Some(TickOutcome::Sent(msg)) => {
             db::log_action(&state.db, Some(&project.id), instance_id, "pida_send", Some(&serde_json::json!({"message": msg})), final_state.note.as_deref(), None).await?;
@@ -437,6 +473,12 @@ async fn persist_tick(state: &AppState, project: &Project, final_state: &Heartbe
             db::set_project_status(&state.db, &project.id, ProjectStatus::Error, final_state.note.as_deref()).await?;
             db::set_heartbeat_enabled(&state.db, &project.id, false).await?;
             db::log_action(&state.db, Some(&project.id), instance_id, "mark_error", None, final_state.note.as_deref(), None).await?;
+        }
+        Some(TickOutcome::Blocked(description)) => {
+            let task = db::create_human_task(&state.db, &project.id, description).await?;
+            db::set_project_status(&state.db, &project.id, ProjectStatus::Blocked, final_state.note.as_deref()).await?;
+            db::set_heartbeat_enabled(&state.db, &project.id, false).await?;
+            db::log_action(&state.db, Some(&project.id), instance_id, "create_human_task", Some(&serde_json::json!({"task_id": task.id, "description": description})), final_state.note.as_deref(), None).await?;
         }
         _ => {
             db::touch_heartbeat(&state.db, &project.id, final_state.note.as_deref()).await?;

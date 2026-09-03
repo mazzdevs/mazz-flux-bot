@@ -27,9 +27,10 @@ header {
 header h1 { margin: 0; font-size: 1.4rem; }
 header .sub { color: var(--muted); margin: 0.25rem 0 0; font-size: 0.85rem; }
 header { position: relative; }
-header #settings-toggle { position: absolute; top: 1.5rem; right: 0; }
+header .header-actions { position: absolute; top: 1.5rem; right: 0; display: flex; gap: 0.5rem; align-items: center; }
+button.icon-btn { font-size: 1rem; line-height: 1; padding: 0.25rem 0.6rem; }
 
-dialog#settings-dialog {
+dialog#settings-dialog, dialog#create-dialog {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
@@ -37,8 +38,8 @@ dialog#settings-dialog {
   padding: 1.25rem 1.5rem;
   width: 420px;
 }
-dialog#settings-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
-dialog#settings-dialog h2 { margin: 0 0 0.25rem; font-size: 1.05rem; }
+dialog#settings-dialog::backdrop, dialog#create-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog#settings-dialog h2, dialog#create-dialog h2 { margin: 0 0 0.25rem; font-size: 1.05rem; }
 dialog#settings-dialog fieldset {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -46,37 +47,22 @@ dialog#settings-dialog fieldset {
   padding: 0.6rem 0.8rem 0.8rem;
 }
 dialog#settings-dialog legend { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
-dialog#settings-dialog label { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
+dialog#settings-dialog label, dialog#create-dialog label { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.7rem; }
 dialog#settings-dialog .hint { color: var(--ok); font-style: italic; }
-dialog#settings-dialog input {
+dialog#settings-dialog input, dialog#create-dialog input, dialog#create-dialog textarea {
   width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
   padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem; margin-top: 0.25rem;
+  font-family: inherit;
 }
-dialog#settings-dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
-dialog#settings-dialog .dialog-actions button[type="submit"] {
+dialog#create-dialog textarea { min-height: 5rem; resize: vertical; }
+dialog#settings-dialog .dialog-actions, dialog#create-dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+dialog#settings-dialog .dialog-actions button[type="submit"], dialog#create-dialog .dialog-actions button[type="submit"] {
   background: var(--accent); color: white; border: none; border-radius: 6px; padding: 0.4rem 1rem; cursor: pointer;
 }
 
 main { max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 2rem; }
 
 section h2 { font-size: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.75rem; }
-
-form#create-form { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-form#create-form input, form#create-form textarea {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 0.5rem 0.7rem;
-  border-radius: 6px;
-  font-size: 0.9rem;
-}
-form#create-form input#name { flex: 0 0 180px; }
-form#create-form input#constellation { flex: 0 0 220px; }
-form#create-form textarea { flex: 1 1 300px; min-height: 2.4rem; resize: vertical; }
-form#create-form button {
-  background: var(--accent); color: white; border: none; border-radius: 6px;
-  padding: 0.5rem 1.1rem; cursor: pointer; font-size: 0.9rem;
-}
 
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
@@ -89,9 +75,48 @@ td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); vertical-al
 .status-running { color: var(--ok); border-color: var(--ok); }
 .status-error { color: var(--danger); border-color: var(--danger); }
 .status-done { color: var(--accent); border-color: var(--accent); }
+.status-blocked { color: #e0a95a; border-color: #e0a95a; }
 
 td.goal { max-width: 260px; color: var(--muted); }
 td.note { max-width: 220px; color: var(--muted); font-style: italic; }
+
+.section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
+.section-header h2 { margin: 0; }
+.view-toggle { display: flex; gap: 0.25rem; }
+.view-toggle button.active { border-color: var(--accent); color: var(--accent); }
+
+a.project-link { color: var(--text); text-decoration: none; border-bottom: 1px dotted var(--muted); }
+a.project-link:hover { color: var(--accent); border-color: var(--accent); }
+
+.projects-tiles { display: none; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0.9rem; }
+.projects-tiles.active { display: grid; }
+#projects-table.hidden { display: none; }
+
+.project-tile {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 0.9rem 1rem; display: flex; flex-direction: column; gap: 0.5rem;
+}
+.project-tile .tile-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
+.project-tile .tile-head strong { font-size: 0.95rem; }
+.project-tile .goal { color: var(--muted); font-size: 0.8rem; max-height: 3.2em; overflow: hidden; }
+.project-tile .note { color: var(--muted); font-size: 0.78rem; font-style: italic; }
+.project-tile .tile-instance { font-size: 0.75rem; color: var(--muted); }
+.project-tile .tile-actions { margin-top: auto; display: flex; flex-wrap: wrap; gap: 0.25rem; }
+
+.badge {
+  display: inline-block; background: var(--danger); color: white; border-radius: 999px;
+  font-size: 0.7rem; padding: 0.05rem 0.5rem; margin-left: 0.4rem; vertical-align: middle;
+}
+.badge.zero { display: none; }
+
+.human-tasks-list { list-style: none; margin: 0; padding: 0; font-size: 0.85rem; }
+.human-tasks-list li {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem;
+  padding: 0.55rem 0; border-bottom: 1px solid var(--border);
+}
+.human-tasks-list .task-desc { flex: 1; }
+.human-tasks-list .task-meta { color: var(--muted); font-size: 0.75rem; }
+.human-tasks-list .empty { color: var(--muted); font-style: italic; padding: 0.4rem 0; }
 
 button.mini {
   background: transparent; border: 1px solid var(--border); color: var(--text);
@@ -100,7 +125,27 @@ button.mini {
 button.mini:hover { border-color: var(--accent); }
 button.mini.danger:hover { border-color: var(--danger); color: var(--danger); }
 
-#log-list { list-style: none; margin: 0; padding: 0; font-size: 0.8rem; color: var(--muted); max-height: 320px; overflow-y: auto; }
-#log-list li { padding: 0.35rem 0; border-bottom: 1px solid var(--border); }
-#log-list .action { color: var(--text); font-weight: 500; }
-#log-list .ts { float: right; color: var(--muted); }
+#log-list, .log-list { list-style: none; margin: 0; padding: 0; font-size: 0.8rem; color: var(--muted); max-height: 320px; overflow-y: auto; }
+#log-list li, .log-list li { padding: 0.35rem 0; border-bottom: 1px solid var(--border); }
+#log-list .action, .log-list .action { color: var(--text); font-weight: 500; }
+#log-list .ts, .log-list .ts { float: right; color: var(--muted); }
+
+/* ---- Project detail page ---- */
+
+table.kv { width: 100%; font-size: 0.85rem; }
+table.kv th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.35rem 0.8rem 0.35rem 0; white-space: nowrap; vertical-align: top; }
+table.kv td { padding: 0.35rem 0; }
+
+textarea#message-text {
+  width: 100%; min-height: 4rem; background: var(--panel); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 0.5rem 0.7rem; font-family: inherit; font-size: 0.9rem; resize: vertical;
+}
+#message-form { display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+#message-form button {
+  background: var(--accent); color: white; border: none; border-radius: 6px; padding: 0.4rem 1rem; cursor: pointer;
+}
+
+.notes-list { list-style: none; margin: 0; padding: 0; font-size: 0.85rem; max-height: 400px; overflow-y: auto; }
+.notes-list li { padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
+.notes-list pre { white-space: pre-wrap; word-break: break-word; margin: 0.25rem 0 0; color: var(--text); font-family: inherit; font-size: 0.85rem; }
+.notes-list .empty { color: var(--muted); font-style: italic; }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
-use crate::models::{ActionLogEntry, CreateProjectRequest, Project, ProjectStatus};
+use crate::models::{ActionLogEntry, CreateProjectRequest, HumanTask, Project, ProjectNote, ProjectStatus};
 
 pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
     let opts = SqliteConnectOptions::new()
@@ -86,6 +86,39 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    // Blockers the conductor raised via `create_human_task` — see
+    // heartbeat.rs's TickOutcome::Blocked.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS human_tasks (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id   TEXT NOT NULL,
+            description  TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'open',
+            created_at   TEXT NOT NULL,
+            resolved_at  TEXT
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    // Markdown notes the conductor chose to persist about a project. Content
+    // stored directly here (not on disk) — deliberately simple for now, see
+    // PLAN.md.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS project_notes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id  TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }
 
@@ -160,11 +193,31 @@ pub async fn set_project_status(pool: &SqlitePool, id: &str, status: ProjectStat
     Ok(())
 }
 
+/// Only touches the boolean flag — NOT `status`. Callers set status
+/// explicitly (see `set_project_status`/`set_project_status_only`). This used
+/// to also force status to running/paused, which meant calling this after
+/// `set_project_status(Done)` (as heartbeat.rs's mark_done path does) would
+/// silently clobber "done" back to "paused" — the two are independent
+/// columns and must be set independently.
 pub async fn set_heartbeat_enabled(pool: &SqlitePool, id: &str, enabled: bool) -> Result<()> {
-    let status = if enabled { ProjectStatus::Running.as_str() } else { ProjectStatus::Paused.as_str() };
-    sqlx::query("UPDATE projects SET heartbeat_enabled = ?1, status = ?2, updated_at = ?3 WHERE id = ?4")
+    sqlx::query("UPDATE projects SET heartbeat_enabled = ?1, updated_at = ?2 WHERE id = ?3")
         .bind(enabled as i64)
-        .bind(status)
+        .bind(now())
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Like `set_project_status` but leaves `last_note` untouched — for callers
+/// (start/pause) that are just flipping lifecycle state, not reporting a
+/// reason. `set_project_status` overwrites `last_note` unconditionally
+/// (unlike `touch_heartbeat`'s COALESCE), which is correct for the
+/// conductor's terminal outcomes but wrong for a plain user-initiated
+/// start/pause that shouldn't erase the last thing the conductor said.
+pub async fn set_project_status_only(pool: &SqlitePool, id: &str, status: ProjectStatus) -> Result<()> {
+    sqlx::query("UPDATE projects SET status = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(status.as_str())
         .bind(now())
         .bind(id)
         .execute(pool)
@@ -290,4 +343,69 @@ pub async fn set_setting(pool: &SqlitePool, key: &str, value: &str) -> Result<()
             .await?;
     }
     Ok(())
+}
+
+// ---- Human tasks (conductor-raised blockers) ------------------------------
+
+pub async fn create_human_task(pool: &SqlitePool, project_id: &str, description: &str) -> Result<HumanTask> {
+    let ts = now();
+    let id = sqlx::query("INSERT INTO human_tasks (project_id, description, status, created_at) VALUES (?1, ?2, 'open', ?3)")
+        .bind(project_id)
+        .bind(description)
+        .bind(&ts)
+        .execute(pool)
+        .await?
+        .last_insert_rowid();
+    Ok(HumanTask { id, project_id: project_id.to_string(), description: description.to_string(), status: "open".to_string(), created_at: ts, resolved_at: None })
+}
+
+fn row_to_human_task(row: &sqlx::sqlite::SqliteRow) -> HumanTask {
+    HumanTask {
+        id: row.get("id"),
+        project_id: row.get("project_id"),
+        description: row.get("description"),
+        status: row.get("status"),
+        created_at: row.get("created_at"),
+        resolved_at: row.get("resolved_at"),
+    }
+}
+
+/// `project_id = None` lists across all projects (the dashboard-wide panel).
+pub async fn list_human_tasks(pool: &SqlitePool, project_id: Option<&str>, open_only: bool) -> Result<Vec<HumanTask>> {
+    let rows = match (project_id, open_only) {
+        (Some(pid), true) => {
+            sqlx::query("SELECT * FROM human_tasks WHERE project_id = ?1 AND status = 'open' ORDER BY created_at DESC").bind(pid).fetch_all(pool).await?
+        }
+        (Some(pid), false) => sqlx::query("SELECT * FROM human_tasks WHERE project_id = ?1 ORDER BY created_at DESC").bind(pid).fetch_all(pool).await?,
+        (None, true) => sqlx::query("SELECT * FROM human_tasks WHERE status = 'open' ORDER BY created_at DESC").fetch_all(pool).await?,
+        (None, false) => sqlx::query("SELECT * FROM human_tasks ORDER BY created_at DESC").fetch_all(pool).await?,
+    };
+    Ok(rows.iter().map(row_to_human_task).collect())
+}
+
+pub async fn resolve_human_task(pool: &SqlitePool, id: i64) -> Result<()> {
+    sqlx::query("UPDATE human_tasks SET status = 'resolved', resolved_at = ?1 WHERE id = ?2").bind(now()).bind(id).execute(pool).await?;
+    Ok(())
+}
+
+// ---- Project notes (conductor-authored markdown) --------------------------
+
+pub async fn add_project_note(pool: &SqlitePool, project_id: &str, content: &str) -> Result<ProjectNote> {
+    let ts = now();
+    let id = sqlx::query("INSERT INTO project_notes (project_id, content, created_at) VALUES (?1, ?2, ?3)")
+        .bind(project_id)
+        .bind(content)
+        .bind(&ts)
+        .execute(pool)
+        .await?
+        .last_insert_rowid();
+    Ok(ProjectNote { id, project_id: project_id.to_string(), content: content.to_string(), created_at: ts })
+}
+
+pub async fn list_project_notes(pool: &SqlitePool, project_id: &str) -> Result<Vec<ProjectNote>> {
+    let rows = sqlx::query("SELECT * FROM project_notes WHERE project_id = ?1 ORDER BY created_at DESC").bind(project_id).fetch_all(pool).await?;
+    Ok(rows
+        .iter()
+        .map(|r| ProjectNote { id: r.get("id"), project_id: r.get("project_id"), content: r.get("content"), created_at: r.get("created_at") })
+        .collect())
 }

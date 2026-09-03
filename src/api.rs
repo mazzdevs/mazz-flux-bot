@@ -55,13 +55,18 @@ pub async fn delete_project(State(state): State<AppState>, Path(id): Path<String
 }
 
 pub async fn start_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    // Explicit status set (not implied by set_heartbeat_enabled, which only
+    // touches the boolean flag) — this is also how a Blocked/Error/Done
+    // project gets manually resumed back to Running.
     db::set_heartbeat_enabled(&state.db, &id, true).await?;
+    db::set_project_status_only(&state.db, &id, crate::models::ProjectStatus::Running).await?;
     db::log_action(&state.db, Some(&id), None, "heartbeat_started", None, None, None).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn pause_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
     db::set_heartbeat_enabled(&state.db, &id, false).await?;
+    db::set_project_status_only(&state.db, &id, crate::models::ProjectStatus::Paused).await?;
     db::log_action(&state.db, Some(&id), None, "heartbeat_paused", None, None, None).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -177,4 +182,50 @@ pub async fn update_settings(State(state): State<AppState>, Json(req): Json<Upda
     }
     db::log_action(&state.db, None, None, "settings_updated", None, None, None).await?;
     Ok(Json(conductor::settings_status(&state.db).await))
+}
+
+// ---- Human tasks (conductor-raised blockers) -----------------------------
+
+#[derive(Deserialize, Default)]
+pub struct HumanTaskQuery {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Default true — the dashboard-wide panel only wants open ones. Pass
+    /// `?open=false` to see resolved tasks too (used on the project detail
+    /// page's full history).
+    pub open: Option<bool>,
+}
+
+/// Attaches `project_name` to each task for display — the frontend has no
+/// other cheap way to resolve project_id -> name without an extra round trip
+/// per task.
+pub async fn list_human_tasks(State(state): State<AppState>, Query(q): Query<HumanTaskQuery>) -> ApiResult<Json<serde_json::Value>> {
+    let tasks = db::list_human_tasks(&state.db, q.project_id.as_deref(), q.open.unwrap_or(true)).await?;
+    let mut entries = Vec::with_capacity(tasks.len());
+    for t in tasks {
+        let project_name = db::get_project(&state.db, &t.project_id).await?.map(|p| p.name);
+        entries.push(json!({
+            "id": t.id,
+            "project_id": t.project_id,
+            "project_name": project_name,
+            "description": t.description,
+            "status": t.status,
+            "created_at": t.created_at,
+            "resolved_at": t.resolved_at,
+        }));
+    }
+    Ok(Json(json!({ "entries": entries })))
+}
+
+pub async fn resolve_human_task(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<serde_json::Value>> {
+    db::resolve_human_task(&state.db, id).await?;
+    db::log_action(&state.db, None, None, "human_task_resolved", None, Some(&id.to_string()), None).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- Project notes (conductor-authored markdown) --------------------------
+
+pub async fn list_project_notes(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    let notes = db::list_project_notes(&state.db, &id).await?;
+    Ok(Json(json!({ "notes": notes })))
 }

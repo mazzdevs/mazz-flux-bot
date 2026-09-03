@@ -15,6 +15,9 @@ pub enum ProjectStatus {
     Done,
     /// The conductor (or vape) hit an unrecoverable error working this project.
     Error,
+    /// The conductor raised a human task (see `HumanTask`) and heartbeat is
+    /// paused until a person resolves it and restarts the project.
+    Blocked,
 }
 
 impl ProjectStatus {
@@ -25,6 +28,7 @@ impl ProjectStatus {
             ProjectStatus::Paused => "paused",
             ProjectStatus::Done => "done",
             ProjectStatus::Error => "error",
+            ProjectStatus::Blocked => "blocked",
         }
     }
 
@@ -34,6 +38,7 @@ impl ProjectStatus {
             "paused" => ProjectStatus::Paused,
             "done" => ProjectStatus::Done,
             "error" => ProjectStatus::Error,
+            "blocked" => ProjectStatus::Blocked,
             _ => ProjectStatus::Draft,
         }
     }
@@ -75,6 +80,31 @@ pub struct ActionLogEntry {
     pub detail: Option<String>,
     pub result: Option<String>,
     pub error: Option<String>,
+    pub created_at: String,
+}
+
+/// A blocker the conductor raised via the `create_human_task` action —
+/// something it judged only a person can resolve. Pauses the project's
+/// heartbeat until resolved (see `heartbeat.rs`'s `TickOutcome::Blocked`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanTask {
+    pub id: i64,
+    pub project_id: String,
+    pub description: String,
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+/// A markdown note the conductor chose to persist about a project — its own
+/// running log of findings/context, independent of which per-tick action it
+/// took. Stored as plain text in sqlite, no rendering/indexing beyond that
+/// for now (see PLAN.md).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectNote {
+    pub id: i64,
+    pub project_id: String,
+    pub content: String,
     pub created_at: String,
 }
 

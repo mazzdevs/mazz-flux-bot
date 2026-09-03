@@ -461,3 +461,87 @@ Two related changes, done together:
 
 `AppState` no longer holds a `brain`/`conductor` field at all — it's not a cached value,
 it's resolved on demand (heartbeat ticks, `GET /api/settings`) directly from DB+env.
+
+## Human tasks, project notes, project detail page, view toggle (2026-09-03)
+
+### Bug fix (found while building this): status/heartbeat_enabled clobber
+
+`db::set_heartbeat_enabled` used to also force `status` to `running`/`paused` as a side
+effect. `persist_tick`'s `mark_done`/`mark_error` branches called
+`set_project_status(Done/Error)` immediately followed by `set_heartbeat_enabled(false)` —
+the second call silently overwrote `status` back to `'paused'`. **Every prior
+`mark_done`/`mark_error` in this project's history ended up persisted as `'paused'`, not
+`'done'`/`'error'`.** Fixed by decoupling: `set_heartbeat_enabled` now only touches the
+boolean column; a new `set_project_status_only` (status without touching `last_note`) is
+used by the API's `start`/`pause` handlers, which previously relied on the old
+side-effecting behavior. Verified fixed via a full real-pipeline run (see below) — a
+`mark_done` now correctly persists as `status: "done"`.
+
+### New conductor action: `create_human_task`
+
+Decision gains a fifth action alongside wait/send_message/mark_done/mark_error. When the
+conductor judges a blocker needs a person (missing credentials, ambiguous authority,
+needs approval), it responds with `{"action": "create_human_task", "message": "<what's
+needed>", ...}`. This creates a row in a new `human_tasks` table, flips the project to a
+new `ProjectStatus::Blocked`, and disables the heartbeat (same shutdown pattern as
+done/error) so it doesn't keep re-raising the same blocker every tick. A human resolves it
+via `POST /api/human-tasks/{id}/resolve` (dashboard panel or project detail page) and
+separately clicks Start to resume — resolving doesn't auto-resume, by design (a person
+should decide when to re-engage, not just tick the box).
+
+### New conductor action: `add_note`
+
+Independent of `action` — the conductor can attach a markdown note to any decision
+(including `wait`) via `{"add_note": "..."}`. Persisted verbatim to a new `project_notes`
+table (plain text in sqlite, no rendering/file storage — deliberately simple per request).
+Surfaced on the project detail page as a reverse-chronological list, each rendered in a
+`<pre>` block (no markdown-to-HTML rendering added — out of scope for now, content is
+still just plain text so it's fully readable as-is).
+
+### Project detail page (`/project.html?id=...`)
+
+New static page + `project.js`, linked from every project row/tile on the dashboard.
+Shows: status/constellation/instance, **explicit heartbeat_enabled + last_heartbeat_at +
+last_note** (the specific ask — "surface when heartbeats run"), a manual message-send
+box, this project's human tasks (open + resolved), its notes, live pida status + recent
+session messages (reuses the existing `/api/instances/{id}/status`+`/session`
+endpoints), and its action log filtered to this project — which **doubles as the
+heartbeat activity feed**, since every tick (including no-op ticks) already logs there.
+No separate heartbeat-run table was added; the existing action_log already is that record.
+
+### Dashboard: list/tile view toggle + human tasks panel
+
+Two icon buttons (☰ list / ▦ tiles) next to the Projects heading switch the display
+between the existing table and a new card-grid view (`.project-tile`); preference persisted
+in `localStorage` so it survives reloads. A new dashboard-wide "Human tasks" panel (with a
+red count badge) lists every open blocker across all projects with a Resolve button,
+resolving the same way as the per-project list.
+
+(Note: while implementing this, found `index.html`/`app.js`/`style.css` had already been
+edited in parallel — "New project" had been converted from an inline form into its own
+`<dialog>` with a `+` toggle button. Built on top of that rather than reverting it.)
+
+### Verification
+
+Full end-to-end test through the **real** conductor pipeline (not simulated) using two
+local mock HTTP servers: one standing in for vape-manager (`CADMIUM_VAPE_URL` override,
+serves create/agent-status/pida-status/session/chat), one standing in for OpenRouter
+(new `OPENROUTER_API_URL` override, added specifically to make this possible — mirrors
+`CADMIUM_VAPE_URL`'s existing pattern, kept in the codebase as a general testing hook).
+Confirmed live: create_instance → fetch_status → decide (mock returns create_human_task +
+add_note) → human_tasks row created, project_notes row created, status→`blocked`,
+heartbeat disabled, both actions logged with correct detail. Then resumed the project,
+mock's second scripted response (`mark_done` + a second `add_note`) confirmed the
+status-clobber fix for real: final `status: "done"`, `last_note: "goal achieved"`,
+`heartbeat_enabled: false`, two notes present in order.
+
+### Confidence notes
+
+- `create_human_task`/`add_note` were exercised via a scripted mock LLM response, not a
+  real Anthropic/OpenRouter call — the JSON contract itself (what the real model actually
+  outputs) is unverified beyond the existing spice tests, which only cover
+  parsing/fallback safety, not whether a real model reliably uses these two new fields
+  correctly. Worth a real-key spike (same pattern as the vape spike) before trusting this
+  in anger with production goals.
+- No markdown rendering was added for notes — they display as plain preformatted text.
+  If that's not enough, revisit with a minimal client-side markdown renderer.

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>mazz-flux-bot — project</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <p class="sub"><a class="project-link" href="/">← Dashboard</a></p>
+    <h1 id="project-name">Loading…</h1>
+    <p class="sub" id="project-goal"></p>
+    <div class="header-actions">
+      <button id="p-start" class="mini" type="button">Start</button>
+      <button id="p-pause" class="mini" type="button">Pause</button>
+      <button id="p-delete" class="mini danger" type="button">Delete</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="overview">
+      <h2>Overview</h2>
+      <table class="kv">
+        <tbody>
+          <tr><th>Status</th><td id="ov-status"></td></tr>
+          <tr><th>Constellation</th><td id="ov-constellation"></td></tr>
+          <tr><th>Instance</th><td id="ov-instance"></td></tr>
+          <tr><th>Heartbeat</th><td id="ov-heartbeat"></td></tr>
+          <tr><th>Last heartbeat</th><td id="ov-last-heartbeat"></td></tr>
+          <tr><th>Last note</th><td id="ov-last-note"></td></tr>
+          <tr><th>Created</th><td id="ov-created"></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="instance-status">
+      <h2>Live instance status</h2>
+      <div id="instance-status-body" class="sub">No instance yet.</div>
+    </section>
+
+    <section id="send-message">
+      <h2>Send a message</h2>
+      <form id="message-form">
+        <textarea id="message-text" placeholder="steer the agent, or answer a pending question…"></textarea>
+        <button type="submit">Send</button>
+      </form>
+    </section>
+
+    <section id="human-tasks-section">
+      <h2>Human tasks</h2>
+      <ul id="p-human-tasks" class="human-tasks-list"></ul>
+    </section>
+
+    <section id="notes-section">
+      <h2>Notes</h2>
+      <ul id="p-notes" class="notes-list"></ul>
+    </section>
+
+    <section id="heartbeat-activity">
+      <h2>Heartbeat activity</h2>
+      <p class="sub">Every heartbeat tick for this project logs here, including ticks that took no action.</p>
+      <ul id="p-log" class="log-list"></ul>
+    </section>
+  </main>
+
+  <script src="/project.js"></script>
+</body>
+</html>

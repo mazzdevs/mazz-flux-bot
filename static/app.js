@@ -1,6 +1,10 @@
 const projectsBody = document.getElementById("projects-body");
+const projectsTiles = document.getElementById("projects-tiles");
+const projectsTable = document.getElementById("projects-table");
 const logList = document.getElementById("log-list");
 const constellationsList = document.getElementById("constellations");
+const humanTasksList = document.getElementById("human-tasks-list");
+const humanTasksCount = document.getElementById("human-tasks-count");
 
 async function api(path, opts) {
   const res = await fetch(path, {
@@ -16,6 +20,7 @@ function statusClass(status) {
   if (status === "running") return "status-running";
   if (status === "error") return "status-error";
   if (status === "done") return "status-done";
+  if (status === "blocked") return "status-blocked";
   return "";
 }
 
@@ -36,28 +41,49 @@ async function loadConstellations() {
   }
 }
 
+function projectActionsHtml(p) {
+  const canStart = p.status !== "running";
+  return [
+    canStart
+      ? `<button class="mini" data-act="start" data-id="${p.id}">Start</button>`
+      : `<button class="mini" data-act="pause" data-id="${p.id}">Pause</button>`,
+    `<button class="mini danger" data-act="delete" data-id="${p.id}">Delete</button>`,
+  ].join("");
+}
+
 async function loadProjects() {
   const { projects } = await api("/api/projects");
-  projectsBody.innerHTML = (projects || [])
+  const list = projects || [];
+
+  projectsBody.innerHTML = list
     .map((p) => {
       const instanceCell = p.vape_instance_id
         ? `<code>${escapeHtml(p.vape_instance_id)}</code>`
         : `<span class="note">none yet</span>`;
-      const canStart = p.status !== "running";
-      const actions = [
-        canStart
-          ? `<button class="mini" data-act="start" data-id="${p.id}">Start</button>`
-          : `<button class="mini" data-act="pause" data-id="${p.id}">Pause</button>`,
-        `<button class="mini danger" data-act="delete" data-id="${p.id}">Delete</button>`,
-      ].join("");
       return `<tr>
-        <td>${escapeHtml(p.name)}</td>
+        <td><a class="project-link" href="/project.html?id=${p.id}">${escapeHtml(p.name)}</a></td>
         <td><span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span></td>
         <td>${instanceCell}</td>
         <td class="goal">${escapeHtml(p.goal)}</td>
         <td class="note">${escapeHtml(p.last_note || "")}</td>
-        <td>${actions}</td>
+        <td>${projectActionsHtml(p)}</td>
       </tr>`;
+    })
+    .join("");
+
+  projectsTiles.innerHTML = list
+    .map((p) => {
+      const instance = p.vape_instance_id ? `<code>${escapeHtml(p.vape_instance_id)}</code>` : "none yet";
+      return `<div class="project-tile">
+        <div class="tile-head">
+          <a class="project-link" href="/project.html?id=${p.id}"><strong>${escapeHtml(p.name)}</strong></a>
+          <span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span>
+        </div>
+        <div class="goal">${escapeHtml(p.goal)}</div>
+        <div class="tile-instance">instance: ${instance}</div>
+        <div class="note">${escapeHtml(p.last_note || "")}</div>
+        <div class="tile-actions">${projectActionsHtml(p)}</div>
+      </div>`;
     })
     .join("");
 }
@@ -74,22 +100,70 @@ async function loadLog() {
     .join("");
 }
 
-projectsBody.addEventListener("click", async (ev) => {
-  const btn = ev.target.closest("button[data-act]");
+async function loadHumanTasks() {
+  const { entries } = await api("/api/human-tasks");
+  const tasks = entries || [];
+  humanTasksCount.textContent = tasks.length || "";
+  humanTasksCount.classList.toggle("zero", tasks.length === 0);
+  humanTasksCount.classList.toggle("badge", tasks.length > 0);
+
+  humanTasksList.innerHTML = tasks.length
+    ? tasks
+        .map(
+          (t) => `<li>
+            <div class="task-desc">
+              <a class="project-link" href="/project.html?id=${t.project_id}">${escapeHtml(t.project_name || t.project_id)}</a>:
+              ${escapeHtml(t.description)}
+              <div class="task-meta">${escapeHtml(t.created_at)}</div>
+            </div>
+            <button class="mini" data-resolve="${t.id}">Resolve</button>
+          </li>`
+        )
+        .join("")
+    : `<li class="empty">No open human tasks.</li>`;
+}
+
+humanTasksList.addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button[data-resolve]");
   if (!btn) return;
-  const { act, id } = btn.dataset;
   try {
-    if (act === "start") await api(`/api/projects/${id}/start`, { method: "POST" });
-    if (act === "pause") await api(`/api/projects/${id}/pause`, { method: "POST" });
-    if (act === "delete") {
-      if (!confirm("Delete this project? (does not delete the vape instance)")) return;
-      await api(`/api/projects/${id}`, { method: "DELETE" });
-    }
-    await loadProjects();
+    await api(`/api/human-tasks/${btn.dataset.resolve}/resolve`, { method: "POST" });
+    await Promise.all([loadHumanTasks(), loadProjects()]);
   } catch (e) {
     alert(e.message);
   }
 });
+
+function bindProjectActions(container) {
+  container.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("button[data-act]");
+    if (!btn) return;
+    const { act, id } = btn.dataset;
+    try {
+      if (act === "start") await api(`/api/projects/${id}/start`, { method: "POST" });
+      if (act === "pause") await api(`/api/projects/${id}/pause`, { method: "POST" });
+      if (act === "delete") {
+        if (!confirm("Delete this project? (does not delete the vape instance)")) return;
+        await api(`/api/projects/${id}`, { method: "DELETE" });
+      }
+      await loadProjects();
+    } catch (e) {
+      alert(e.message);
+    }
+  });
+}
+bindProjectActions(projectsBody);
+bindProjectActions(projectsTiles);
+
+// ---- Create-project dialog ---------------------------------------------
+
+const createDialog = document.getElementById("create-dialog");
+
+document.getElementById("create-toggle").addEventListener("click", async () => {
+  await loadConstellations();
+  createDialog.showModal();
+});
+document.getElementById("create-close").addEventListener("click", () => createDialog.close());
 
 document.getElementById("create-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -99,19 +173,31 @@ document.getElementById("create-form").addEventListener("submit", async (ev) => 
   try {
     await api("/api/projects", { method: "POST", body: JSON.stringify({ name, constellation, goal }) });
     ev.target.reset();
+    createDialog.close();
     await loadProjects();
   } catch (e) {
     alert(e.message);
   }
 });
 
-async function tick() {
-  try {
-    await Promise.all([loadProjects(), loadLog()]);
-  } catch (e) {
-    console.error(e);
-  }
+// ---- List/tile view toggle ----------------------------------------------
+
+const VIEW_KEY = "mfb-project-view";
+const viewListBtn = document.getElementById("view-list");
+const viewTilesBtn = document.getElementById("view-tiles");
+
+function applyView(view) {
+  const tiles = view === "tiles";
+  projectsTable.classList.toggle("hidden", tiles);
+  projectsTiles.classList.toggle("active", tiles);
+  viewListBtn.classList.toggle("active", !tiles);
+  viewTilesBtn.classList.toggle("active", tiles);
+  localStorage.setItem(VIEW_KEY, view);
 }
+
+viewListBtn.addEventListener("click", () => applyView("list"));
+viewTilesBtn.addEventListener("click", () => applyView("tiles"));
+applyView(localStorage.getItem(VIEW_KEY) || "list");
 
 // ---- Settings dialog --------------------------------------------------
 
@@ -177,6 +263,14 @@ document.querySelectorAll("#settings-dialog button[data-clear]").forEach((btn) =
     }
   });
 });
+
+async function tick() {
+  try {
+    await Promise.all([loadProjects(), loadLog(), loadHumanTasks()]);
+  } catch (e) {
+    console.error(e);
+  }
+}
 
 loadConstellations();
 tick();

@@ -65,9 +65,13 @@ impl OpenRouterClient {
             ],
         });
 
+        // Override for local testing against a mock server — mirrors
+        // vape_client.rs's CADMIUM_VAPE_URL pattern. Not meant for production
+        // use (there's only one real OpenRouter endpoint).
+        let url = std::env::var("OPENROUTER_API_URL").unwrap_or_else(|_| OPENROUTER_API_URL.to_string());
         let resp = self
             .http
-            .post(OPENROUTER_API_URL)
+            .post(url)
             .bearer_auth(api_key)
             .json(&body)
             .send()

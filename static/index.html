@@ -9,8 +9,28 @@
   <header>
     <h1>mazz-flux-bot</h1>
     <p class="sub">one pida instance per project, heartbeat-driven</p>
-    <button id="settings-toggle" class="mini" type="button">⚙ Settings</button>
+    <div class="header-actions">
+      <button id="create-toggle" class="mini icon-btn" type="button" title="New project">+</button>
+      <button id="settings-toggle" class="mini" type="button">⚙ Settings</button>
+    </div>
   </header>
+
+  <dialog id="create-dialog">
+    <form id="create-form">
+      <h2>New project</h2>
+      <label>Name</label>
+      <input type="text" id="name" placeholder="name" required />
+      <label>Constellation</label>
+      <input type="text" id="constellation" list="constellations" placeholder="e.g. back-office" required />
+      <datalist id="constellations"></datalist>
+      <label>Goal</label>
+      <textarea id="goal" placeholder="what should the agent accomplish?" required></textarea>
+      <div class="dialog-actions">
+        <button type="button" id="create-close" class="mini">Cancel</button>
+        <button type="submit">Create</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="settings-dialog">
     <form id="settings-form">
@@ -45,20 +65,21 @@
   </dialog>
 
   <main>
-    <section id="create-project">
-      <h2>New project</h2>
-      <form id="create-form">
-        <input type="text" id="name" placeholder="name" required />
-        <input type="text" id="constellation" list="constellations" placeholder="constellation (e.g. back-office)" required />
-        <datalist id="constellations"></datalist>
-        <textarea id="goal" placeholder="goal — what should the agent accomplish?" required></textarea>
-        <button type="submit">Create</button>
-      </form>
+    <section id="human-tasks">
+      <h2>Human tasks <span class="badge" id="human-tasks-count"></span></h2>
+      <ul id="human-tasks-list" class="human-tasks-list"></ul>
     </section>
 
     <section id="projects">
-      <h2>Projects</h2>
-      <table>
+      <div class="section-header">
+        <h2>Projects</h2>
+        <div class="view-toggle">
+          <button id="view-list" class="mini icon-btn" type="button" title="List view">☰</button>
+          <button id="view-tiles" class="mini icon-btn" type="button" title="Tile view">▦</button>
+        </div>
+      </div>
+
+      <table id="projects-table">
         <thead>
           <tr>
             <th>Name</th><th>Status</th><th>Instance</th><th>Goal</th><th>Last note</th><th>Actions</th>
@@ -66,6 +87,8 @@
         </thead>
         <tbody id="projects-body"></tbody>
       </table>
+
+      <div id="projects-tiles" class="projects-tiles"></div>
     </section>
 
     <section id="log">
