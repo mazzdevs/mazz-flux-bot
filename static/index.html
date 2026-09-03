@@ -55,7 +55,7 @@
         <button type="button" class="mini danger" data-clear="openrouter_api_key">Clear key</button>
       </fieldset>
 
-      <p class="sub">Anthropic wins if both are set. Keys are stored in the local sqlite DB, never shown here again once saved.</p>
+      <p class="sub">Anthropic wins if both are set. Keys are stored in settings.json in the state directory, never shown here again once saved.</p>
 
       <div class="dialog-actions">
         <button type="button" id="settings-close" class="mini">Close</button>
@@ -65,6 +65,12 @@
   </dialog>
 
   <main>
+    <div class="tab-strip">
+      <button class="tab-btn active" id="tab-dashboard" data-tab="dashboard" type="button">Dashboard</button>
+      <button class="tab-btn" id="tab-files" data-tab="files" type="button">Files</button>
+    </div>
+
+    <div id="tab-panel-dashboard" class="tab-panel active">
     <section id="human-tasks">
       <h2>Human tasks <span class="badge" id="human-tasks-count"></span></h2>
       <ul id="human-tasks-list" class="human-tasks-list"></ul>
@@ -92,11 +98,29 @@
     </section>
 
     <section id="log">
-      <h2>Action log</h2>
+      <h2>Action log (global)</h2>
       <ul id="log-list"></ul>
     </section>
+    </div>
+
+    <div id="tab-panel-files" class="tab-panel">
+      <section id="files">
+        <div class="section-header">
+          <h2>State files</h2>
+          <button id="files-refresh" class="mini" type="button">Refresh</button>
+        </div>
+        <div id="files-breadcrumb" class="files-breadcrumb"></div>
+        <div class="files-layout">
+          <ul id="files-list" class="files-list"></ul>
+          <div id="files-editor" class="files-editor">
+            <div class="files-editor-empty">Select a file to view or edit it.</div>
+          </div>
+        </div>
+      </section>
+    </div>
   </main>
 
   <script src="/app.js"></script>
+  <script src="/files.js"></script>
 </body>
 </html>

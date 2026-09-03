@@ -33,6 +33,33 @@ pub struct Store {
     lock: Mutex<()>,
 }
 
+/// One entry in a directory listing returned by `Store::browse`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileEntry {
+    pub name: String,
+    /// Root-relative, forward-slash path — what callers should pass back
+    /// into `browse`/`read_file`/`write_file`/`delete_file`.
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified_at: Option<String>,
+}
+
+/// Result of browsing a path in the store — either a directory listing or
+/// a single file's content.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BrowseResult {
+    Dir { path: String, entries: Vec<FileEntry> },
+    File { path: String, content: String, size: u64, modified_at: Option<String> },
+}
+
+/// Files larger than this are refused for reading/browsing through the file
+/// browser — this store only ever holds small JSON/markdown records, so
+/// anything bigger is either a mistake or not something the textarea-based
+/// editor should be pointed at.
+const MAX_BROWSABLE_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -467,6 +494,126 @@ impl Store {
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(out)
     }
+
+    // ---- File browser (raw filesystem access for the web UI) --------------
+
+    /// Resolves a caller-supplied relative path against the store root,
+    /// rejecting anything that would escape it (`..` components, absolute
+    /// paths). Returns the resolved absolute path — not guaranteed to
+    /// exist yet (callers writing a new file rely on that).
+    fn resolve_path(&self, rel: &str) -> Result<PathBuf> {
+        let rel = rel.trim_start_matches('/');
+        let mut resolved = self.root.clone();
+        for component in Path::new(rel).components() {
+            match component {
+                std::path::Component::Normal(part) => {
+                    // Blocks dotfile/dir access through this API entirely —
+                    // most importantly the state repo's own `.git`, which
+                    // must never be readable/writable/deletable this way.
+                    if part.to_str().is_some_and(|s| s.starts_with('.')) {
+                        anyhow::bail!("invalid path: {rel}");
+                    }
+                    resolved.push(part);
+                }
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    anyhow::bail!("invalid path: {rel}");
+                }
+            }
+        }
+        // Defends against symlink escape too: canonicalize what already
+        // exists and confirm it's still under root. A path that doesn't
+        // exist yet (new file write) can't be canonicalized — checked at
+        // its nearest existing ancestor instead.
+        let mut check = resolved.clone();
+        loop {
+            if let Ok(canon) = check.canonicalize() {
+                let canon_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+                if !canon.starts_with(&canon_root) {
+                    anyhow::bail!("path escapes store root: {rel}");
+                }
+                break;
+            }
+            match check.parent() {
+                Some(p) if p != check => check = p.to_path_buf(),
+                _ => break,
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Root-relative, forward-slash path for display/API purposes.
+    fn display_path(&self, abs: &Path) -> String {
+        abs.strip_prefix(&self.root).unwrap_or(abs).to_string_lossy().replace('\\', "/")
+    }
+
+    /// Browses `rel` — a directory listing if it's a dir (or the root, for
+    /// `rel == ""`), or a single file's content if it's a file.
+    pub async fn browse(&self, rel: &str) -> Result<BrowseResult> {
+        let abs = self.resolve_path(rel)?;
+        let meta = fs::metadata(&abs).await.with_context(|| format!("reading {}", abs.display()))?;
+
+        if meta.is_dir() {
+            let mut entries = Vec::new();
+            let mut rd = fs::read_dir(&abs).await.with_context(|| format!("reading dir {}", abs.display()))?;
+            while let Some(entry) = rd.next_entry().await? {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Hide dotfiles/dirs (notably `.git`, the state repo's own
+                // git metadata) — nothing a user should be poking at
+                // through this editor.
+                if name.starts_with('.') {
+                    continue;
+                }
+                let entry_meta = entry.metadata().await?;
+                let path = entry.path();
+                entries.push(FileEntry {
+                    name: entry.file_name().to_string_lossy().to_string(),
+                    path: self.display_path(&path),
+                    is_dir: entry_meta.is_dir(),
+                    size: entry_meta.len(),
+                    modified_at: modified_rfc3339(&entry_meta),
+                });
+            }
+            entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+            Ok(BrowseResult::Dir { path: self.display_path(&abs), entries })
+        } else {
+            if meta.len() > MAX_BROWSABLE_FILE_BYTES {
+                anyhow::bail!("file too large to browse ({} bytes, max {})", meta.len(), MAX_BROWSABLE_FILE_BYTES);
+            }
+            let content = fs::read_to_string(&abs).await.with_context(|| format!("reading {} (not valid UTF-8?)", abs.display()))?;
+            Ok(BrowseResult::File { path: self.display_path(&abs), content, size: meta.len(), modified_at: modified_rfc3339(&meta) })
+        }
+    }
+
+    /// Overwrites (or creates) a file at `rel` with `content`, creating
+    /// parent directories as needed. Rejects paths that resolve to an
+    /// existing directory.
+    pub async fn write_file(&self, rel: &str, content: &str) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let abs = self.resolve_path(rel)?;
+        if let Ok(meta) = fs::metadata(&abs).await {
+            if meta.is_dir() {
+                anyhow::bail!("{rel} is a directory");
+            }
+        }
+        write_atomic(&abs, content).await
+    }
+
+    /// Deletes a single file at `rel`. Refuses to delete directories —
+    /// this is a low-risk file editor, not a bulk-delete tool.
+    pub async fn delete_file(&self, rel: &str) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let abs = self.resolve_path(rel)?;
+        let meta = fs::metadata(&abs).await.with_context(|| format!("reading {}", abs.display()))?;
+        if meta.is_dir() {
+            anyhow::bail!("{rel} is a directory, refusing to delete");
+        }
+        fs::remove_file(&abs).await.with_context(|| format!("removing {}", abs.display()))
+    }
+}
+
+fn modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
+    meta.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
 }
 
 /// Splits the leading `<!-- created_at: ... -->` line written by

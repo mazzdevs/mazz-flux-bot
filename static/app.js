@@ -275,3 +275,19 @@ async function tick() {
 loadConstellations();
 tick();
 setInterval(tick, 5000);
+
+// ---- Top-level tab strip (Dashboard / Files) ---------------------------
+
+const TAB_KEY = "mfb-active-tab";
+const tabButtons = document.querySelectorAll(".tab-btn");
+const tabPanels = document.querySelectorAll(".tab-panel");
+
+function applyTab(tab) {
+  tabButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
+  tabPanels.forEach((panel) => panel.classList.toggle("active", panel.id === `tab-panel-${tab}`));
+  localStorage.setItem(TAB_KEY, tab);
+  if (tab === "files" && window.filesTab) window.filesTab.onShow();
+}
+
+tabButtons.forEach((btn) => btn.addEventListener("click", () => applyTab(btn.dataset.tab)));
+applyTab(localStorage.getItem(TAB_KEY) || "dashboard");

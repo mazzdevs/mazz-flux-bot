@@ -244,3 +244,35 @@ pub async fn commit_state(State(state): State<AppState>, Json(req): Json<CommitS
     state.store.log_action(None, None, "state_committed", None, Some(&serde_json::to_string(&summary)?), None).await?;
     Ok(Json(serde_json::to_value(summary)?))
 }
+
+// ---- File browser (raw read/edit access to the state directory) ----------
+
+#[derive(Deserialize, Default)]
+pub struct FilesQuery {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+pub async fn browse_files(State(state): State<AppState>, Query(q): Query<FilesQuery>) -> ApiResult<Json<serde_json::Value>> {
+    let result = state.store.browse(q.path.as_deref().unwrap_or("")).await?;
+    Ok(Json(serde_json::to_value(result)?))
+}
+
+#[derive(Deserialize)]
+pub struct WriteFileRequest {
+    pub content: String,
+}
+
+pub async fn write_file(State(state): State<AppState>, Query(q): Query<FilesQuery>, Json(req): Json<WriteFileRequest>) -> ApiResult<Json<serde_json::Value>> {
+    let path = q.path.ok_or_else(|| anyhow::anyhow!("path is required"))?;
+    state.store.write_file(&path, &req.content).await?;
+    state.store.log_action(None, None, "file_written", Some(&json!({"path": path})), None, None).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn delete_file(State(state): State<AppState>, Query(q): Query<FilesQuery>) -> ApiResult<Json<serde_json::Value>> {
+    let path = q.path.ok_or_else(|| anyhow::anyhow!("path is required"))?;
+    state.store.delete_file(&path).await?;
+    state.store.log_action(None, None, "file_deleted", Some(&json!({"path": path})), None, None).await?;
+    Ok(Json(json!({ "ok": true })))
+}

@@ -78,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/instances/{id}/session", get(api::get_instance_session))
         .route("/api/constellations", get(api::list_constellations))
         .route("/api/settings", get(api::get_settings).post(api::update_settings))
-        .route("/api/state/commit", post(api::commit_state));
+        .route("/api/state/commit", post(api::commit_state))
+        .route("/api/files", get(api::browse_files).put(api::write_file).delete(api::delete_file));
 
     let app = Router::new()
         .merge(api_routes)
