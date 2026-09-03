@@ -55,10 +55,24 @@ pub struct Project {
     pub status: String,
     pub vape_instance_id: Option<String>,
     pub heartbeat_enabled: bool,
+    /// How often the heartbeat loop ticks this project, in seconds. Defaults
+    /// to `heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS` (15 minutes) for new
+    /// projects, editable per project via `PATCH
+    /// /api/projects/{id}/heartbeat-interval`.
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
     pub last_note: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub last_heartbeat_at: Option<String>,
+}
+
+/// Serde default for `Project::heartbeat_interval_secs` — keeps `models.rs`
+/// free of a direct dependency on `heartbeat.rs` for the literal, while still
+/// reading pre-existing project JSON files written before this field existed
+/// (missing field → 15 minutes, not 0).
+fn default_heartbeat_interval_secs() -> u64 {
+    15 * 60
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,13 +81,16 @@ pub struct CreateProjectRequest {
     pub goal: String,
     #[serde(default)]
     pub constellation: Option<String>,
+    /// Defaults to `heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS` if omitted.
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<u64>,
 }
 
 /// One row in the action_log table — every mutating call the tool made (or, in
 /// dry-run mode, would have made) plus the conductor's reasoning ticks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionLogEntry {
-    pub id: i64,
+    pub id: String,
     pub project_id: Option<String>,
     pub instance_id: Option<String>,
     pub action: String,
@@ -88,7 +105,7 @@ pub struct ActionLogEntry {
 /// heartbeat until resolved (see `heartbeat.rs`'s `TickOutcome::Blocked`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HumanTask {
-    pub id: i64,
+    pub id: String,
     pub project_id: String,
     pub description: String,
     pub status: String,
@@ -102,7 +119,7 @@ pub struct HumanTask {
 /// for now (see PLAN.md).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectNote {
-    pub id: i64,
+    pub id: String,
     pub project_id: String,
     pub content: String,
     pub created_at: String,

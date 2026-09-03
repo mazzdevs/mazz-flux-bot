@@ -28,12 +28,60 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use crate::conductor::Conductor;
-use crate::db;
 use crate::models::{CreateInstanceRequest, JobConfig, PidaStatus, Project, ProjectStatus};
 use crate::vape_client::VapeClient;
 use crate::AppState;
 
-const DEFAULT_INTERVAL_SECS: u64 = 60;
+/// Default per-project heartbeat cadence (see `Project::heartbeat_interval_secs`) —
+/// 15 minutes, editable per project via `PATCH /api/projects/{id}/heartbeat-interval`.
+pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 15 * 60;
+
+/// How often the outer loop wakes up to check which projects are due —
+/// independent of any individual project's own interval. Short on purpose
+/// (project intervals can be much shorter than 15 minutes), overridable via
+/// `HEARTBEAT_SCAN_INTERVAL_SECS` for tests/tuning.
+pub const DEFAULT_SCAN_INTERVAL_SECS: u64 = 15;
+
+/// Tracks the outer scan loop's own cadence (NOT any individual project's
+/// heartbeat interval — see `Project::heartbeat_interval_secs` for that). UI
+/// consumers should compute each project's own next-due time from its
+/// `last_heartbeat_at` + `heartbeat_interval_secs`; this clock is just proof
+/// the scan loop is alive and roughly how fresh its own view is.
+pub struct HeartbeatClock {
+    pub interval_secs: u64,
+    last_tick_at: std::sync::RwLock<chrono::DateTime<chrono::Utc>>,
+}
+
+impl HeartbeatClock {
+    pub fn new(interval_secs: u64) -> Self {
+        Self { interval_secs, last_tick_at: std::sync::RwLock::new(chrono::Utc::now()) }
+    }
+
+    fn mark(&self) {
+        *self.last_tick_at.write().unwrap() = chrono::Utc::now();
+    }
+
+    pub fn status(&self) -> serde_json::Value {
+        let last = *self.last_tick_at.read().unwrap();
+        let next = last + chrono::Duration::seconds(self.interval_secs as i64);
+        serde_json::json!({
+            "scan_interval_secs": self.interval_secs,
+            "last_scan_at": last.to_rfc3339(),
+            "next_scan_at": next.to_rfc3339(),
+        })
+    }
+}
+
+/// True if `project` is due for a heartbeat tick right now: never ticked, or
+/// its own `heartbeat_interval_secs` has elapsed since `last_heartbeat_at`.
+/// An unparseable timestamp is treated as "due" (fail open — better to tick
+/// an extra time than to silently stop ticking a project forever).
+fn is_due(project: &Project) -> bool {
+    let Some(last) = &project.last_heartbeat_at else { return true };
+    let Ok(last) = chrono::DateTime::parse_from_rfc3339(last) else { return true };
+    let elapsed = chrono::Utc::now().signed_duration_since(last.with_timezone(&chrono::Utc));
+    elapsed.num_seconds() >= project.heartbeat_interval_secs as i64
+}
 
 /// The conductor's structured answer for one tick. We ask Anthropic to respond
 /// with exactly this JSON shape; if it doesn't (or the key isn't configured),
@@ -362,16 +410,17 @@ fn build_graph(vape: Arc<VapeClient>, conductor: Arc<Conductor>) -> CompiledGrap
 // ---- Outer polling loop ----------------------------------------------------
 
 pub async fn run(state: AppState) {
-    let interval_secs: u64 = std::env::var("HEARTBEAT_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_INTERVAL_SECS);
-    info!(interval_secs, "heartbeat loop starting");
+    let interval_secs = state.heartbeat_clock.interval_secs;
+    info!(interval_secs, "heartbeat scan loop starting (each project ticks on its own interval, default {}s)", DEFAULT_HEARTBEAT_INTERVAL_SECS);
 
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     loop {
         ticker.tick().await;
+        state.heartbeat_clock.mark();
 
         // Resolved fresh every tick (not cached) so a key saved through the
         // settings UI mid-run takes effect on the very next tick.
-        let conductor = Arc::new(Conductor::from_sources(&state.db).await);
+        let conductor = Arc::new(Conductor::from_sources(&state.store).await);
         let graph = build_graph(state.vape.clone(), conductor);
         let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
 
@@ -381,12 +430,36 @@ pub async fn run(state: AppState) {
     }
 }
 
+/// Forces one heartbeat tick for a single project right now, bypassing both
+/// the `heartbeat_enabled`/`status == running` filter AND the per-project
+/// `is_due` interval check that the periodic scan loop applies — this is an
+/// explicit "do it now" request (e.g. the project detail page's "Force
+/// heartbeat" button, useful when an instance was stuck `Instance not
+/// ready` and the project's own interval hasn't elapsed yet). Does NOT
+/// reset the scan loop's own `HeartbeatClock` — that's about the scan
+/// loop's cadence, not any individual project's last-processed time. It DOES
+/// update the project's own `last_heartbeat_at` via the normal
+/// `persist_tick` path, which pushes this project's next-due time forward
+/// by its interval, same as an automatic tick would.
+pub async fn force_tick(state: &AppState, project_id: &str) -> anyhow::Result<()> {
+    let project = state.store.get_project(project_id).await?.ok_or_else(|| anyhow::anyhow!("project {project_id} not found"))?;
+
+    let conductor = Arc::new(Conductor::from_sources(&state.store).await);
+    let graph = build_graph(state.vape.clone(), conductor);
+    let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
+
+    process_project(state, &executor, &project).await
+}
+
 async fn tick(state: &AppState, executor: &Executor<HeartbeatState>) -> anyhow::Result<()> {
-    let projects = db::list_running_projects(&state.db).await?;
+    let projects = state.store.list_running_projects().await?;
     for project in projects {
+        if !is_due(&project) {
+            continue;
+        }
         if let Err(e) = process_project(state, executor, &project).await {
             error!(project_id = %project.id, error = %e, "failed to process project this tick");
-            let _ = db::log_action(&state.db, Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_error", None, None, Some(&e.to_string())).await;
+            let _ = state.store.log_action(Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_error", None, None, Some(&e.to_string())).await;
         }
     }
     Ok(())
@@ -412,8 +485,8 @@ async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, 
         RunOutcome::Interrupted { state: final_state, reason, .. } => persist_tick(state, project, &final_state, Some(reason)).await,
         RunOutcome::Failed { state: final_state, node, error } => {
             warn!(project_id = %project.id, %node, %error, "heartbeat graph node failed");
-            db::log_action(&state.db, Some(&project.id), final_state.vape_instance_id.as_deref(), "heartbeat_node_failed", None, None, Some(&format!("{node}: {error}"))).await?;
-            db::touch_heartbeat(&state.db, &project.id, Some(&format!("node '{node}' failed: {error}"))).await?;
+            state.store.log_action(Some(&project.id), final_state.vape_instance_id.as_deref(), "heartbeat_node_failed", None, None, Some(&format!("{node}: {error}"))).await?;
+            state.store.touch_heartbeat(&project.id, Some(&format!("node '{node}' failed: {error}"))).await?;
             Ok(())
         }
     }
@@ -424,27 +497,27 @@ async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, 
 async fn persist_tick(state: &AppState, project: &Project, final_state: &HeartbeatState, interrupt_reason: Option<String>) -> anyhow::Result<()> {
     if project.vape_instance_id.is_none() {
         if let Some(id) = &final_state.vape_instance_id {
-            db::set_project_instance(&state.db, &project.id, id).await?;
-            db::log_action(&state.db, Some(&project.id), Some(id), "create_instance", None, Some(id), None).await?;
-            db::touch_heartbeat(&state.db, &project.id, Some("instance created")).await?;
+            state.store.set_project_instance(&project.id, id).await?;
+            state.store.log_action(Some(&project.id), Some(id), "create_instance", None, Some(id), None).await?;
+            state.store.touch_heartbeat(&project.id, Some("instance created")).await?;
         } else {
             let note = final_state.note.clone().unwrap_or_else(|| "create_instance did not return an id".to_string());
-            db::log_action(&state.db, Some(&project.id), None, "create_instance_dry_run", None, Some(&note), None).await?;
-            db::touch_heartbeat(&state.db, &project.id, Some(&note)).await?;
+            state.store.log_action(Some(&project.id), None, "create_instance_dry_run", None, Some(&note), None).await?;
+            state.store.touch_heartbeat(&project.id, Some(&note)).await?;
         }
         return Ok(());
     }
 
     if let Some(reason) = interrupt_reason {
-        db::log_action(&state.db, Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_interrupted", None, Some(&reason), None).await?;
-        db::touch_heartbeat(&state.db, &project.id, Some(&reason)).await?;
+        state.store.log_action(Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_interrupted", None, Some(&reason), None).await?;
+        state.store.touch_heartbeat(&project.id, Some(&reason)).await?;
         return Ok(());
     }
 
     if let Some(h) = &final_state.harness {
         if h != "pida" {
             warn!(project_id = %project.id, harness = %h, "instance is not running the pida harness — mazz-flux-bot only drives pida instances for now");
-            db::touch_heartbeat(&state.db, &project.id, Some(&format!("skipped: instance harness is '{h}', not 'pida'"))).await?;
+            state.store.touch_heartbeat(&project.id, Some(&format!("skipped: instance harness is '{h}', not 'pida'"))).await?;
             return Ok(());
         }
     }
@@ -454,34 +527,34 @@ async fn persist_tick(state: &AppState, project: &Project, final_state: &Heartbe
     // Persisted regardless of which action was taken — see Decision::add_note.
     if let Some(note_md) = &final_state.add_note {
         if !note_md.is_empty() {
-            db::add_project_note(&state.db, &project.id, note_md).await?;
-            db::log_action(&state.db, Some(&project.id), instance_id, "add_note", None, Some(&format!("{} chars", note_md.len())), None).await?;
+            state.store.add_project_note(&project.id, note_md).await?;
+            state.store.log_action(Some(&project.id), instance_id, "add_note", None, Some(&format!("{} chars", note_md.len())), None).await?;
         }
     }
 
     match &final_state.outcome {
         Some(TickOutcome::Sent(msg)) => {
-            db::log_action(&state.db, Some(&project.id), instance_id, "pida_send", Some(&serde_json::json!({"message": msg})), final_state.note.as_deref(), None).await?;
-            db::touch_heartbeat(&state.db, &project.id, Some(&format!("sent: {msg}"))).await?;
+            state.store.log_action(Some(&project.id), instance_id, "pida_send", Some(&serde_json::json!({"message": msg})), final_state.note.as_deref(), None).await?;
+            state.store.touch_heartbeat(&project.id, Some(&format!("sent: {msg}"))).await?;
         }
         Some(TickOutcome::Done) => {
-            db::set_project_status(&state.db, &project.id, ProjectStatus::Done, final_state.note.as_deref()).await?;
-            db::set_heartbeat_enabled(&state.db, &project.id, false).await?;
-            db::log_action(&state.db, Some(&project.id), instance_id, "mark_done", None, final_state.note.as_deref(), None).await?;
+            state.store.set_project_status(&project.id, ProjectStatus::Done, final_state.note.as_deref()).await?;
+            state.store.set_heartbeat_enabled(&project.id, false).await?;
+            state.store.log_action(Some(&project.id), instance_id, "mark_done", None, final_state.note.as_deref(), None).await?;
         }
         Some(TickOutcome::Error) => {
-            db::set_project_status(&state.db, &project.id, ProjectStatus::Error, final_state.note.as_deref()).await?;
-            db::set_heartbeat_enabled(&state.db, &project.id, false).await?;
-            db::log_action(&state.db, Some(&project.id), instance_id, "mark_error", None, final_state.note.as_deref(), None).await?;
+            state.store.set_project_status(&project.id, ProjectStatus::Error, final_state.note.as_deref()).await?;
+            state.store.set_heartbeat_enabled(&project.id, false).await?;
+            state.store.log_action(Some(&project.id), instance_id, "mark_error", None, final_state.note.as_deref(), None).await?;
         }
         Some(TickOutcome::Blocked(description)) => {
-            let task = db::create_human_task(&state.db, &project.id, description).await?;
-            db::set_project_status(&state.db, &project.id, ProjectStatus::Blocked, final_state.note.as_deref()).await?;
-            db::set_heartbeat_enabled(&state.db, &project.id, false).await?;
-            db::log_action(&state.db, Some(&project.id), instance_id, "create_human_task", Some(&serde_json::json!({"task_id": task.id, "description": description})), final_state.note.as_deref(), None).await?;
+            let task = state.store.create_human_task(&project.id, description).await?;
+            state.store.set_project_status(&project.id, ProjectStatus::Blocked, final_state.note.as_deref()).await?;
+            state.store.set_heartbeat_enabled(&project.id, false).await?;
+            state.store.log_action(Some(&project.id), instance_id, "create_human_task", Some(&serde_json::json!({"task_id": task.id, "description": description})), final_state.note.as_deref(), None).await?;
         }
         _ => {
-            db::touch_heartbeat(&state.db, &project.id, final_state.note.as_deref()).await?;
+            state.store.touch_heartbeat(&project.id, final_state.note.as_deref()).await?;
         }
     }
     Ok(())

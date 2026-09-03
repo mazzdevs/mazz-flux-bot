@@ -6,8 +6,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::conductor;
-use crate::db;
 use crate::models::CreateProjectRequest;
+use crate::state_repo;
 use crate::AppState;
 
 /// Wraps anyhow::Error so handlers can just use `?` and get a sane 500 JSON
@@ -32,25 +32,25 @@ type ApiResult<T> = Result<T, AppError>;
 // ---- Projects -----------------------------------------------------------
 
 pub async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let projects = db::list_projects(&state.db).await?;
+    let projects = state.store.list_projects().await?;
     Ok(Json(json!({ "projects": projects })))
 }
 
 pub async fn create_project(State(state): State<AppState>, Json(req): Json<CreateProjectRequest>) -> ApiResult<Json<serde_json::Value>> {
-    let project = db::create_project(&state.db, req).await?;
-    db::log_action(&state.db, Some(&project.id), None, "project_created", None, None, None).await?;
+    let project = state.store.create_project(req).await?;
+    state.store.log_action(Some(&project.id), None, "project_created", None, None, None).await?;
     Ok(Json(json!({ "project": project })))
 }
 
 pub async fn get_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    match db::get_project(&state.db, &id).await? {
+    match state.store.get_project(&id).await? {
         Some(p) => Ok(Json(json!({ "project": p })).into_response()),
         None => Ok((StatusCode::NOT_FOUND, Json(json!({"error": "project not found"}))).into_response()),
     }
 }
 
 pub async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
-    db::delete_project(&state.db, &id).await?;
+    state.store.delete_project(&id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -58,16 +58,16 @@ pub async fn start_project(State(state): State<AppState>, Path(id): Path<String>
     // Explicit status set (not implied by set_heartbeat_enabled, which only
     // touches the boolean flag) — this is also how a Blocked/Error/Done
     // project gets manually resumed back to Running.
-    db::set_heartbeat_enabled(&state.db, &id, true).await?;
-    db::set_project_status_only(&state.db, &id, crate::models::ProjectStatus::Running).await?;
-    db::log_action(&state.db, Some(&id), None, "heartbeat_started", None, None, None).await?;
+    state.store.set_heartbeat_enabled(&id, true).await?;
+    state.store.set_project_status_only(&id, crate::models::ProjectStatus::Running).await?;
+    state.store.log_action(Some(&id), None, "heartbeat_started", None, None, None).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn pause_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
-    db::set_heartbeat_enabled(&state.db, &id, false).await?;
-    db::set_project_status_only(&state.db, &id, crate::models::ProjectStatus::Paused).await?;
-    db::log_action(&state.db, Some(&id), None, "heartbeat_paused", None, None, None).await?;
+    state.store.set_heartbeat_enabled(&id, false).await?;
+    state.store.set_project_status_only(&id, crate::models::ProjectStatus::Paused).await?;
+    state.store.log_action(Some(&id), None, "heartbeat_paused", None, None, None).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -81,10 +81,10 @@ pub struct SendMessageRequest {
 /// without waiting for the next heartbeat, or when ANTHROPIC_API_KEY isn't
 /// configured at all.
 pub async fn send_project_message(State(state): State<AppState>, Path(id): Path<String>, Json(req): Json<SendMessageRequest>) -> ApiResult<Json<serde_json::Value>> {
-    let project = db::get_project(&state.db, &id).await?.ok_or_else(|| anyhow::anyhow!("project not found"))?;
+    let project = state.store.get_project(&id).await?.ok_or_else(|| anyhow::anyhow!("project not found"))?;
     let instance_id = project.vape_instance_id.ok_or_else(|| anyhow::anyhow!("project has no instance yet"))?;
     let resp = state.vape.pida_send(&instance_id, &req.message).await?;
-    db::log_action(&state.db, Some(&id), Some(&instance_id), "manual_send", Some(&json!({"message": req.message})), Some(&resp.to_string()), None).await?;
+    state.store.log_action(Some(&id), Some(&instance_id), "manual_send", Some(&json!({"message": req.message})), Some(&resp.to_string()), None).await?;
     Ok(Json(json!({ "result": resp })))
 }
 
@@ -95,7 +95,7 @@ pub struct LogQuery {
 }
 
 pub async fn action_log(State(state): State<AppState>, Query(q): Query<LogQuery>) -> ApiResult<Json<serde_json::Value>> {
-    let entries = db::list_action_log(&state.db, q.project_id.as_deref(), q.limit.unwrap_or(100)).await?;
+    let entries = state.store.list_action_log(q.project_id.as_deref(), q.limit.unwrap_or(100)).await?;
     Ok(Json(json!({ "entries": entries })))
 }
 
@@ -104,12 +104,12 @@ pub async fn action_log(State(state): State<AppState>, Query(q): Query<LogQuery>
 pub async fn list_instances(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     match state.vape.list_instances().await {
         Ok((raw, instances)) => {
-            let _ = db::cache_instance_list(&state.db, &raw).await;
+            let _ = state.store.cache_instance_list(&raw).await;
             Ok(Json(json!({ "instances": instances, "source": "live" })))
         }
         Err(e) => {
             tracing::warn!(error = %e, "live instance list failed, falling back to cache");
-            match db::get_cached_instance_list(&state.db).await? {
+            match state.store.get_cached_instance_list().await? {
                 Some((raw, fetched_at)) => {
                     let instances: serde_json::Value = serde_json::from_str(&raw).unwrap_or(json!([]));
                     Ok(Json(json!({ "instances": instances, "source": "cache", "fetched_at": fetched_at, "live_error": e.to_string() })))
@@ -148,7 +148,7 @@ pub async fn list_constellations(State(state): State<AppState>) -> ApiResult<Jso
 // and a masked last-4 preview. See conductor.rs::settings_status.
 
 pub async fn get_settings(State(state): State<AppState>) -> ApiResult<Json<conductor::SettingsStatus>> {
-    Ok(Json(conductor::settings_status(&state.db).await))
+    Ok(Json(conductor::settings_status(&state.store).await))
 }
 
 #[derive(Deserialize, Default)]
@@ -156,7 +156,7 @@ pub struct UpdateSettingsRequest {
     /// Omitted (not present in the JSON body) means "leave unchanged" —
     /// that's how the settings form avoids clobbering an already-saved key
     /// just because its input was left blank in the UI. An explicit empty
-    /// string clears the key (see `db::set_setting`).
+    /// string clears the key (see `Store::set_setting`).
     #[serde(default)]
     pub anthropic_api_key: Option<String>,
     #[serde(default)]
@@ -169,19 +169,19 @@ pub struct UpdateSettingsRequest {
 
 pub async fn update_settings(State(state): State<AppState>, Json(req): Json<UpdateSettingsRequest>) -> ApiResult<Json<conductor::SettingsStatus>> {
     if let Some(v) = &req.anthropic_api_key {
-        db::set_setting(&state.db, "anthropic_api_key", v).await?;
+        state.store.set_setting("anthropic_api_key", v).await?;
     }
     if let Some(v) = &req.anthropic_model {
-        db::set_setting(&state.db, "anthropic_model", v).await?;
+        state.store.set_setting("anthropic_model", v).await?;
     }
     if let Some(v) = &req.openrouter_api_key {
-        db::set_setting(&state.db, "openrouter_api_key", v).await?;
+        state.store.set_setting("openrouter_api_key", v).await?;
     }
     if let Some(v) = &req.openrouter_model {
-        db::set_setting(&state.db, "openrouter_model", v).await?;
+        state.store.set_setting("openrouter_model", v).await?;
     }
-    db::log_action(&state.db, None, None, "settings_updated", None, None, None).await?;
-    Ok(Json(conductor::settings_status(&state.db).await))
+    state.store.log_action(None, None, "settings_updated", None, None, None).await?;
+    Ok(Json(conductor::settings_status(&state.store).await))
 }
 
 // ---- Human tasks (conductor-raised blockers) -----------------------------
@@ -200,10 +200,10 @@ pub struct HumanTaskQuery {
 /// other cheap way to resolve project_id -> name without an extra round trip
 /// per task.
 pub async fn list_human_tasks(State(state): State<AppState>, Query(q): Query<HumanTaskQuery>) -> ApiResult<Json<serde_json::Value>> {
-    let tasks = db::list_human_tasks(&state.db, q.project_id.as_deref(), q.open.unwrap_or(true)).await?;
+    let tasks = state.store.list_human_tasks(q.project_id.as_deref(), q.open.unwrap_or(true)).await?;
     let mut entries = Vec::with_capacity(tasks.len());
     for t in tasks {
-        let project_name = db::get_project(&state.db, &t.project_id).await?.map(|p| p.name);
+        let project_name = state.store.get_project(&t.project_id).await?.map(|p| p.name);
         entries.push(json!({
             "id": t.id,
             "project_id": t.project_id,
@@ -217,15 +217,103 @@ pub async fn list_human_tasks(State(state): State<AppState>, Query(q): Query<Hum
     Ok(Json(json!({ "entries": entries })))
 }
 
-pub async fn resolve_human_task(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<serde_json::Value>> {
-    db::resolve_human_task(&state.db, id).await?;
-    db::log_action(&state.db, None, None, "human_task_resolved", None, Some(&id.to_string()), None).await?;
+pub async fn resolve_human_task(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    state.store.resolve_human_task(&id).await?;
+    state.store.log_action(None, None, "human_task_resolved", None, Some(&id), None).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 // ---- Project notes (conductor-authored markdown) --------------------------
 
 pub async fn list_project_notes(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
-    let notes = db::list_project_notes(&state.db, &id).await?;
+    let notes = state.store.list_project_notes(&id).await?;
     Ok(Json(json!({ "notes": notes })))
+}
+
+// ---- State repo (persist the file store as its own git history) ----------
+
+#[derive(Deserialize, Default)]
+pub struct CommitStateRequest {
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+pub async fn commit_state(State(state): State<AppState>, Json(req): Json<CommitStateRequest>) -> ApiResult<Json<serde_json::Value>> {
+    let message = req.message.unwrap_or_else(|| format!("manual snapshot {}", chrono::Utc::now().to_rfc3339()));
+    let summary = state_repo::commit(state.store.root(), &message).await?;
+    state.store.log_action(None, None, "state_committed", None, Some(&serde_json::to_string(&summary)?), None).await?;
+    Ok(Json(serde_json::to_value(summary)?))
+}
+
+// ---- File browser (raw read/edit access to the state directory) ----------
+
+#[derive(Deserialize, Default)]
+pub struct FilesQuery {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+pub async fn browse_files(State(state): State<AppState>, Query(q): Query<FilesQuery>) -> ApiResult<Json<serde_json::Value>> {
+    let result = state.store.browse(q.path.as_deref().unwrap_or("")).await?;
+    Ok(Json(serde_json::to_value(result)?))
+}
+
+#[derive(Deserialize)]
+pub struct WriteFileRequest {
+    pub content: String,
+}
+
+pub async fn write_file(State(state): State<AppState>, Query(q): Query<FilesQuery>, Json(req): Json<WriteFileRequest>) -> ApiResult<Json<serde_json::Value>> {
+    let path = q.path.ok_or_else(|| anyhow::anyhow!("path is required"))?;
+    state.store.write_file(&path, &req.content).await?;
+    state.store.log_action(None, None, "file_written", Some(&json!({"path": path})), None, None).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn delete_file(State(state): State<AppState>, Query(q): Query<FilesQuery>) -> ApiResult<Json<serde_json::Value>> {
+    let path = q.path.ok_or_else(|| anyhow::anyhow!("path is required"))?;
+    state.store.delete_file(&path).await?;
+    state.store.log_action(None, None, "file_deleted", Some(&json!({"path": path})), None, None).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- Heartbeat clock / force tick -----------------------------------------
+
+/// Countdown info for the periodic heartbeat loop — last/next tick time and
+/// its interval. Same for every project (the loop processes all running
+/// projects in one pass), so this isn't project-scoped.
+pub async fn heartbeat_status(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(state.heartbeat_clock.status()))
+}
+
+/// Forces one heartbeat tick for this project right now, independent of the
+/// periodic loop's own countdown — useful when a project is stuck on a
+/// transient error (e.g. "Instance not ready") and waiting for the next
+/// automatic tick is unnecessary.
+pub async fn force_heartbeat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    crate::heartbeat::force_tick(&state, &id).await?;
+    state.store.log_action(Some(&id), None, "heartbeat_forced", None, None, None).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct SetHeartbeatIntervalRequest {
+    pub heartbeat_interval_secs: u64,
+}
+
+/// Per-project heartbeat cadence override (default 15 minutes, see
+/// `models::default_heartbeat_interval_secs`). Takes effect on this
+/// project's next due-check — no restart needed.
+pub async fn set_heartbeat_interval(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetHeartbeatIntervalRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.store.set_heartbeat_interval(&id, req.heartbeat_interval_secs).await?;
+    state
+        .store
+        .log_action(Some(&id), None, "heartbeat_interval_updated", Some(&json!({"heartbeat_interval_secs": req.heartbeat_interval_secs})), None, None)
+        .await?;
+    let project = state.store.get_project(&id).await?;
+    Ok(Json(json!({ "project": project })))
 }

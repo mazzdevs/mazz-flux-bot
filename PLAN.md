@@ -1,547 +1,131 @@
-# mazz-flux-bot — plan
-
-A Rust tool that manages VAPE ("flux") dev instances, with a local HTML frontend and a
-local SQLite cache/history DB. Evolved from "cadmium vape but in Rust" into a small
-autonomous orchestrator: you create a **Project** with a natural-language **goal**, and a
-heartbeat loop drives one `pida`-harness vape instance toward that goal — creating it,
-polling its status/session, and (when `ANTHROPIC_API_KEY` is set) asking Claude what to
-do next each tick: wait, steer with a message, or declare the goal done/stuck.
-
-**Status: scaffolded and compiles/runs (2026-09-03).** See "Built" section near the
-bottom for what's real vs. still dry-run-only.
-
-## Confirmed facts (verified live against the real API today, 2026-09-02)
-
-- **Base URL:** `https://vape.stable.dexus.io` (default baked into cadmium; override via
-  `CADMIUM_VAPE_URL`). Requires being on Cloudflare WARP.
-- **Auth:** `Authorization: Bearer <token>` where `<token>` = `gh auth token` (GitHub CLI
-  token). Verified: `GET /api/v1/me` returns `{"username":"mazzdevs", ...}` with this token.
-  No separate credential storage needed — shell out to `gh auth token` at request time.
-- **Reads require no extra scopes** beyond what `gh auth token` already has (repo, read:org, gist).
-- Full REST surface documented in `~/dutchie/vape/CLAUDE.md` (`### REST API v1` section) —
-  this is the source of truth for endpoint list, kept in the vape repo itself.
-
-### Verified-live endpoints (curl'd successfully, 2026-09-02/03, on WARP)
-
-| Method | Path | Notes |
-|---|---|---|
-| GET | `/api/v1/me` | current user |
-| GET | `/api/v1/instances` | list my instances — array with id, name, status, owner, constellation, created_at, urls, pod_ip, ready, labels, bilda/pr info |
-| GET | `/api/v1/instances/{id}` | single instance detail (rich: sidecars, cloudbeaver creds, pr, context_summary) |
-| GET | `/api/v1/instances/{id}/agent-status` | **unified** status: `{"state","active_harness","harnesses":{"<name>":{"state","model",...}}}` — tells you which harness (`bilda` or `pida`) is live, no need to guess |
-| GET | `/api/v1/instances/{id}/{harness}/api/status` | harness-specific detailed status (ready, isStreaming, pendingAsk, planMode, turnLiveness, model, autoMode, ...) |
-| GET | `/api/v1/instances/{id}/{harness}/api/session` | `{"messages":[...], "todos":[...]}` — full chat transcript, confirmed working (returned real conversation history) |
-| GET | `/api/v1/constellations` | list constellations: id, name, description, repos, resources, endpoints, procs, prompt |
-| GET | `/api/v1/constellations/{id}` | single constellation detail (404 with `{"error":{"message","code"}}` shape if unknown id) |
-
-**Key correction from the first pass:** the chat proxy path is **harness-specific**, not
-always `/bilda/...`. An instance can run harness `bilda` *or* `pida` (`cadmium vape create
---harness bilda|pida`) and the proxy segment must match: `/api/v1/instances/{id}/bilda/api/...`
-for bilda instances, `/api/v1/instances/{id}/pida/api/...` for pida ones. That's why the
-first attempt 404'd — the test instance (`e2nwvslk`) turned out to be running `pida`, and
-`/pida/api/status` + `/pida/api/session` both returned 200 once corrected. **Always call
-`/agent-status` first to learn `active_harness`, then build the harness-specific path
-from that** — don't hardcode `bilda`.
-
-### Endpoints from cadmium `--help` / vape source structs — path confirmed via binary
-### string extraction, body shape from source, NOT live-fired (mutating, so not tested
-### during research to avoid side effects on real instances)
-
-| Method | Path | Purpose | Confidence |
-|---|---|---|---|
-| POST | `/api/v1/instances` | create instance | body shape below, from `internal/handlers/api.go: CreateInstanceRequest` — high confidence, not fired live |
-| POST | `/api/v1/instances/{id}/stop` | stop | path string extracted from cadmium binary itself — high confidence |
-| POST | `/api/v1/instances/{id}/start` | start | same — high confidence |
-| DELETE | `/api/v1/instances/{id}` | delete | same pattern as GET, standard REST — high confidence |
-| POST | `/api/v1/instances/{id}/rename` | rename display name | path string extracted from binary — high confidence |
-| POST | `/api/v1/instances/{id}/{harness}/api/chat` | send a chat message, body `{"message": "...", "files"?: [...]}` | path pattern confirmed generic (`/api/v1/instances/%s/%s/api%s` template found in binary strings); body shape from `bilda/server/index.ts` `POST /api/chat` handler — high confidence, not fired live to avoid injecting a message into a real session |
-| POST | `/api/v1/instances/{id}/{harness}/api/answer` | answer a pending question from the agent | same source, not fired |
-| POST | `/api/v1/instances/{id}/{harness}/api/plan-approval` | approve/reject a pending plan | same, not fired |
-| GET | `/api/v1/instances/{id}/{harness}/api/job/result` | structured result of an autonomous job | GET, safe, just not tried against a completed job yet |
-| GET | `/api/v1/instances/{id}/{harness}/api/stream` | SSE — live event stream | matches binary string `/api/v1/instances/%s/%s/api/stream` |
-
-**Create instance request body** (from `internal/handlers/api.go:217`, `CreateInstanceRequest`):
-
-```json
-{
-  "name": "my-instance",
-  "constellation": "back-office",
-  "repos": [{"owner": "GetDutchie", "name": "back-office", "branch": "main"}],
-  "sidecars": ["postgres", "redis"],
-  "labels": {},
-  "subdomain": "my-stable-slug",
-  "prompt": "markdown handed to CLAUDE.md",
-  "ticket": "DEVX-1234"
-}
-```
-Only `name` + `constellation` are required for the basic case; everything else is
-`omitempty`. `Job` (autonomous job config), `resources`, `env_vars`, `endpoints`, `procs`
-overrides exist too but aren't needed for a v1 create form.
-
-**Fallback if a specific mutating endpoint turns out wrong once tried for real:** shell
-out to the `cadmium` binary itself for that one operation (e.g. `cadmium vape send <id>
-"<msg>"`) rather than blocking the whole tool on it — everything else (list/status/session
-reads, create/lifecycle once confirmed) stays direct HTTP.
-
-## Architecture
-
-- **Language:** Rust.
-- **Web server:** `axum`, serving:
-  - A small JSON API (`/api/instances`, `/api/instances/:id/start` etc. — mirrors vape's
-    own shape so the frontend JS is simple).
-  - Static HTML/vanilla-JS frontend (no build step) from `static/` via `tower-http`'s
-    `ServeDir`.
-- **Local DB:** SQLite via `rusqlite` (or `sqlx` with the `sqlite` feature — decide at
-  implementation time; `rusqlite` is simpler for a single-user local tool with no async
-  driver needed, but the rest of the app is async/axum so `sqlx` may fit better — lean
-  `sqlx` unless it's annoying).
-  - **Cache table** `instance_cache`: last-fetched snapshot of `/api/v1/instances` (id,
-    name, status, constellation, owner, created_at, urls_json, pod_ip, ready, raw_json,
-    fetched_at). Lets the UI render instantly on load before the live fetch resolves, and
-    gives an offline/degraded view if the API or WARP tunnel is down.
-  - **Action log table** `action_log`: every mutating action taken through the tool
-    (action type: create/start/stop/delete/send_message, instance id, timestamp, request
-    payload, result/error). Simple audit trail, also handy for "what did I just do".
-  - **Bilda messages cache** (once chat endpoints are confirmed): mirror of `/api/session`
-    messages per instance, so the frontend can show history without re-fetching everything.
-- **Auth:** shell out to `gh auth token` per request — exactly how cadmium itself
-  authenticates (verified: no separate credential store, no config file token; `gh auth
-  status` on this machine shows an active `gho_...` token with `repo`/`read:org`/`gist`
-  scopes, and that token round-tripped fine against `/api/v1/me`). **No `.env` file
-  needed** as long as `gh auth login` is already done on the machine running the tool —
-  which it is here. Only fall back to an env var (e.g. `MAZZ_FLUX_VAPE_TOKEN`) if `gh` is
-  missing or unauthenticated; surface a clear error telling the user to run `gh auth
-  login` first rather than silently prompting for a token.
-- **HTTP client:** `reqwest`.
-- **Base URL override:** support `CADMIUM_VAPE_URL` env var same as cadmium (default
-  `https://vape.stable.dexus.io`), so switching to sandbox/dev is a one-line env change,
-  no code change.
-- **Network dependency:** all of this requires being on Cloudflare WARP (confirmed: calls
-  only succeeded once connected). Tool should give a clear error (not a generic timeout)
-  when the manager is unreachable — e.g. detect connect-timeout/DNS failure and point at
-  `/cf-warp` skill or "connect to WARP" rather than a raw reqwest error.
-
-## Frontend (local HTML)
-
-- Single static page, vanilla JS (`fetch`), talking to the local axum JSON API — not
-  directly to vape (keeps the GitHub token server-side only, never shipped to the browser).
-- Views:
-  1. **Instance list** — table: name, status, constellation, age, ready, urls, PR link if
-     present. Actions per row: start / stop / delete / open chat.
-  2. **Create instance** — pick constellation (from `/api/v1/constellations`), name,
-     submit.
-  3. **Chat panel** — per instance: transcript (from cache + live refresh), a textbox to
-     send a message (`POST .../bilda/api/chat`), status strip (harness/model/cost/todos).
-  4. **Action history** — recent entries from `action_log`.
-- Poll on an interval (e.g. 5s for list, 3s for an open chat panel) — mirrors vape's own
-  frontend polling cadence noted in its CLAUDE.md.
-
-## Project layout (planned)
-
-```
-mazz-flux-bot/
-  Cargo.toml
-  src/
-    main.rs          # axum app wiring, routes
-    vape_client.rs   # reqwest wrapper for vape-manager API + gh-token auth
-    db.rs            # sqlite schema/migrations + cache/log read-write
-    api.rs           # local JSON API handlers (proxy-ish, + DB-backed history)
-    models.rs        # shared structs (Instance, Constellation, ChatMessage, ActionLogEntry)
-  static/
-    index.html
-    app.js
-    style.css
-  mazz-flux-bot.db    # sqlite file (gitignored)
-  PLAN.md             # this file
-```
-
-## Open questions / next steps (in order)
-
-All read endpoints needed for list + status + chat-read are now live-confirmed (see
-table above). Remaining unknowns are only on the **mutating** side, deliberately not
-fired during research:
-
-1. Fire one real `POST /api/v1/instances/{id}/{harness}/api/chat` against an instance you
-   don't mind steering (or a fresh throwaway one) to confirm the response shape exactly
-   matches `{"ok": true}` and that it actually appears in the target's session.
-2. Fire one real `POST /api/v1/instances` create call to confirm the minimal
-   `{"name","constellation"}` body is sufficient and see the actual response shape
-   (`CreateInstanceResponse` — not yet inspected, only the request side).
-3. Confirm `stop`/`start`/`delete`/`rename` response shapes (likely just updated instance
-   JSON or `{"ok":true}` — cheap to confirm on an instance you own once the tool exists
-   and you're using it for real, no need to pre-test blind).
-4. Decide `rusqlite` vs `sqlx` (lean `sqlx` for async consistency with axum unless setup
-   friction argues otherwise).
-5. Scaffold `cargo init`, add deps (`axum`, `tokio`, `reqwest`, `serde`, `sqlx` or
-   `rusqlite`, `tower-http`). Build `vape_client.rs` against the confirmed read endpoints
-   first (me / list / detail / agent-status / session), get the list + chat-read view
-   rendering end-to-end before touching create/lifecycle/chat-send.
-6. Add start/stop/delete/create/chat-send once each is confirmed live (or wire them
-   directly since paths+bodies are already high-confidence — just watch the first real
-   response closely).
-7. Add SQLite cache + action log wiring throughout.
-
-## Answered
-
-- **"Do I need to add tokens to an env file?"** — No. Auth mirrors cadmium exactly: shell
-  out to `gh auth token` at request time, using your existing `gh auth login` session.
-  Nothing to configure unless `gh` itself isn't authenticated on the machine running the
-  tool, in which case the fix is `gh auth login`, not an env file.
-
-## Built (2026-09-03)
-
-Scaffolded, compiles clean, smoke-tested end to end in dry-run mode: create a project →
-start its heartbeat → loop wakes up on its interval → attempts to create a `pida`
-instance for the project's goal → logs the (dry-run) call → project shows the note.
-Real code, real run — not just a plan.
-
-### Layout
-
-```
-mazz-flux-bot/
-  Cargo.toml
-  src/
-    main.rs             # AppState, axum router + static file serving, spawns heartbeat
-    models.rs            # Project/ActionLogEntry + vape API response/request shapes
-    db.rs                 # sqlite (sqlx): projects, action_log, instance_list_cache
-    vape_client.rs        # reqwest wrapper: gh-token auth, confirmed reads + dry-run-gated mutations
-    anthropic_client.rs   # direct api.anthropic.com Messages call, the "brain"
-    heartbeat.rs           # tokio interval loop: create-or-evaluate each running project
-    api.rs                  # axum JSON handlers backing the frontend
-  static/
-    index.html, app.js, style.css   # single-page dashboard, vanilla JS, polls every 5s
-```
-
-### The project/goal/heartbeat model
-
-- **Project** = `{name, goal, constellation, status, vape_instance_id, heartbeat_enabled}`.
-  One row per goal, one vape instance per project (by design — this tool does not fan a
-  project out across multiple instances).
-- **Draft → Running**: creating a project leaves it in `draft` (no instance, no
-  heartbeat). `POST /api/projects/{id}/start` flips `heartbeat_enabled=1` and
-  `status=running` — only then does the loop touch it. `pause` reverses this without
-  losing the instance link.
-- **Heartbeat tick** (`heartbeat.rs`, interval via `HEARTBEAT_INTERVAL_SECS`, default 60s):
-  for every `running` project —
-  1. No `vape_instance_id` yet → `POST /api/v1/instances` with `job.prompt = goal`,
-     `job.harness = "pida"` (see confidence note on that field below). On success, stores
-     the returned id.
-  2. Has an instance → `GET .../agent-status` to confirm harness is actually `pida` (skips
-     — logs a note, doesn't error — if someone's instance ended up on `bilda` instead),
-     then `GET .../pida/api/status` + `.../pida/api/session` (last 6 messages) and hands
-     that plus the goal to the brain.
-  3. **Brain** (`anthropic_client.rs` + `decide_next_action` in `heartbeat.rs`): one
-     Messages API call, system prompt fixes the JSON response shape
-     (`{"action": wait|send_message|mark_done|mark_error, "message"?, "note"?}`). No
-     `ANTHROPIC_API_KEY` → always `wait`, tool only observes. Unparseable model response →
-     also `wait` (never act on a response we can't validate). `send_message` calls
-     `.../pida/api/chat`; `mark_done`/`mark_error` update project status and turn the
-     heartbeat back off (a finished/stuck project shouldn't keep ticking).
-  4. Every tick writes to `action_log` and updates `last_heartbeat_at`/`last_note` — this
-     is the audit trail the dashboard's "Action log" panel tails.
-
-### Safety defaults (read before flipping either of these on)
-
-- **`MAZZ_FLUX_LIVE`** (default unset = off): gates every *mutating* vape call
-  (create/start/stop/delete/`pida_send`). Off by default, every mutating call just logs
-  `[dry-run] would POST ...` and returns a `{"dry_run": true, ...}` marker instead of
-  firing. **Reads always fire live** (list/detail/agent-status/pida status/session) — those
-  are safe and are how the plan's "confirmed live" facts were established. Turn this on
-  (`MAZZ_FLUX_LIVE=1`) only once you're ready for the tool to actually create/steer/delete
-  real cloud instances.
-- **`ANTHROPIC_API_KEY`** (default unset): without it the brain never runs — heartbeat
-  ticks are pure observation (status fetch + log entry), nothing is ever sent to an
-  instance and no Anthropic spend happens. This is a normal env var read directly by
-  `anthropic_client.rs`; no internal WARP-gated LLM gateway was found (checked vape's own
-  `internal/llm/classify.go` — it also just calls `api.anthropic.com` directly with this
-  same env var), so "via Cloudflare WARP" turned out not to apply here — WARP is only
-  needed for the vape-manager calls, not the Anthropic ones.
-- **`CADMIUM_VAPE_URL`** (default `https://vape.stable.dexus.io`) and
-  **`MAZZ_FLUX_DB_PATH`** (default `mazz-flux-bot.db`, relative to cwd) round out the env
-  vars. `PORT` (default `4270`) for the local web UI. `HEARTBEAT_INTERVAL_SECS` (default
-  `60`) for tick cadence.
-
-### Confidence notes carried into the code (see comments at the source)
-
-- `job.harness` on the create-instance body is a **best-effort placement**, not confirmed.
-  The local `vape` checkout's Go structs (`internal/handlers/api.go`) don't have a
-  `harness` field anywhere — that source is stale relative to what's actually deployed.
-  The only evidence `harness` is a real field at all is the literal string `"harness"`
-  found via `strings` on the live `cadmium` binary. Before relying on this, flip
-  `MAZZ_FLUX_LIVE=1` for one real create call and check whether the resulting instance
-  actually comes up on `pida` (via `agent-status`) — if it lands on `bilda` instead, the
-  field needs to move (top-level on `CreateInstanceRequest` instead of nested in `job`, or
-  a different key entirely).
-- `pida_send`'s path/body (`POST .../pida/api/chat`, `{"message": "..."}`) is inferred from
-  the generic `/api/v1/instances/%s/%s/api%s` template found in the cadmium binary plus
-  the `bilda` server's `/api/chat` handler shape (assumed mirrored for `pida` — not
-  independently confirmed, since firing it would inject a real message into a real
-  session). First real `MAZZ_FLUX_LIVE=1` send is the confirmation step.
-- Everything under "Verified-live endpoints" above (agent-status, pida status/session,
-  instances list/detail, constellations) is real — curled and read successfully, and the
-  models in `models.rs` were shaped directly off those real responses.
-
-### Next steps
-
-1. Flip `MAZZ_FLUX_LIVE=1` on a throwaway project and watch one real create → confirm
-   harness lands on `pida` and fix the `job.harness` placement if not.
-2. Set `ANTHROPIC_API_KEY` and watch one real brain tick's `note` in the action log —
-   sanity check the JSON parses and the decision is reasonable before trusting `mark_done`.
-3. Consider a per-project max-heartbeat-ticks or max-spend guard once live — right now a
-   `running` project ticks forever until it hits `mark_done`/`mark_error` or a human pauses
-   it.
-4. `cargo clippy` pass (not run yet) and trim the two dead-code warnings
-   (`ProjectStatus::parse`, `CreateInstanceResponse`) once they're wired to something (e.g.
-   parsing `status` back out of the DB row instead of reading the raw TEXT column, and
-   using the typed create response instead of a raw `serde_json::Value`).
-
-## Metalcraft + spice_framework refactor (2026-09-03)
-
-Per project decision, `heartbeat.rs` was refactored from a hand-rolled if/else tick into a
-[`metalcraft`](https://github.com/rust4ai/metalcraft) (v0.11.0, real published crate)
-typed-state graph, with [`spice_framework`](https://crates.io/crates/spice-framework)
-(v0.2.0) behavioral tests for the decision-parsing logic. Both are legitimate published
-crates from the same small `rust4ai` GitHub org — **naming gotcha for anyone touching this
-later**: crates.io also has an unrelated, empty placeholder crate literally named `spice`
-(a "SPICE protocol" stub, not an AI test harness — its entire content is a default `cargo
-new` unit test). Do not add `spice = "..."`; the real one is `spice-framework`, imported
-in code as `spice_framework` (that's what metalcraft's own examples use too). Also: the
-`rig` feature on `metalcraft` pulls ~600 extra transitive crates (a second `reqwest` major
-version, image/video codecs) for a multi-provider LLM framework we don't need — we kept our
-own minimal `anthropic_client.rs` and use plain `metalcraft` (no `rig` feature).
-
-### The graph (`src/heartbeat.rs`)
-
-```
-route --(no instance)--> create_instance --> END
-  \--(has instance)--> fetch_status --(harness != pida)--> END
-                            \--(pida)--> decide --> act --> END
-```
-
-- **Nodes** (`RouteNode`, `CreateInstanceNode`, `FetchStatusNode`, `DecideNode`, `ActNode`)
-  each hold only the `Arc<VapeClient>`/`Arc<AnthropicClient>` they need — no DB access.
-  This keeps the graph itself unit/spice-testable without a database.
-- **State** (`HeartbeatState`, `pub(crate)`) is built fresh from a `Project` DB row at the
-  start of every tick and thrown away at the end. Durability lives in sqlite
-  (`persist_tick`, the only place `heartbeat.rs` touches the DB), not in the graph — each
-  tick's `Executor::run()` is a fresh, ephemeral run, not a checkpointed long-lived one.
-- **Human-in-the-loop, for real** (not just decorative): `FetchStatusNode` calls
-  `NodeOutcome::interrupt_with(...)` — metalcraft's actual interrupt mechanism — when the
-  instance has a pending question and no `ANTHROPIC_API_KEY` is configured to safely
-  answer it. The executor returns `RunOutcome::Interrupted{reason, ..}`, which
-  `persist_tick` logs as `heartbeat_interrupted` and surfaces as the project's `last_note`.
-  Functionally equivalent to the old "wait" fallback, but now expressed through the
-  library's real interrupt semantics instead of a magic string.
-- **StepGuard** (`loop_guard`) is wired in as defence-in-depth against a future edit
-  accidentally introducing a cycle — the graph is acyclic by construction today (every
-  path terminates at `END` within 4 steps), so this should never actually fire. It does
-  *not* address the separate "a project could tick forever" concern from the original
-  plan (that's cross-tick, at the outer `tokio::interval` level, not intra-tick) — still an
-  open item, see Next Steps below.
-- **Errors**: a node returning `Err` produces `RunOutcome::Failed{state, node, error}`,
-  logged as `heartbeat_node_failed` with the partial state preserved (metalcraft hands back
-  accumulated state on failure rather than dropping it) — nothing crashes the outer loop.
-
-### spice_framework tests (`tests/heartbeat_brain.rs`)
-
-Targets `parse_brain_response` — the safety-critical seam between "whatever text Anthropic
-returned" and "is it safe to act on". No live LLM call, no API key, no network: spice's
-`AgentUnderTest` contract is chat-shaped (`run(user_message, config) -> AgentOutput`), so
-`BrainAdapter` treats `user_message` as the raw brain text and reports the resulting
-`Decision.action` as if it were a tool call — an honest fit since the thing under test
-really is "text in, one bounded/validated decision out."
-
-**Writing the tests caught two real gaps, fixed in the same pass** (this is the point of
-writing behavioral tests before/alongside the code, not after):
-1. A hallucinated action string outside `{wait, send_message, mark_done, mark_error}`
-   parsed "successfully" (non-empty `action` field) and would have passed through
-   unvalidated — `ActNode`'s catch-all happened to treat it as `wait` anyway, but
-   `parse_brain_response` itself wasn't the one guaranteeing that. Fixed: added
-   `KNOWN_ACTIONS` validation directly in the parser.
-2. Markdown-fenced JSON (` ```json\n{...}\n``` `) failed to parse at all despite the
-   system prompt asking the model not to fence it — models don't always comply. Fixed:
-   `strip_markdown_fence` runs before the `serde_json::from_str` attempt.
-
-Run with `cargo test` (both the lib and the spice suite run as part of the normal test
-target — no separate invocation needed).
-
-### Dependency footprint
-
-`cargo tree` sanity check: with `rig` removed, `metalcraft` + `spice-framework` (dev-only)
-add a reasonable, justified set of crates — nothing like the `rig`-feature explosion. Full
-`cargo build` (clean) finishes in ~2-5s incrementally; the one-time cold build after adding
-both crates was ~40s+ (mostly `rig`'s tree before it was removed — plain `metalcraft` alone
-is fast).
-
-## Live spike confirmation (2026-09-03)
-
-Ran a real end-to-end spike: `MAZZ_FLUX_LIVE=1`, project `mfb-spike`
-(constellation=`back-office`, goal="reply hello and report your status, then stop"),
-heartbeat left to run for real against `https://vape.stable.dexus.io`. Both previously
-"not yet fired live" guesses are now **confirmed correct**:
-
-- **`job.harness: "pida"` placement is right.** `POST /api/v1/instances` with our exact
-  body shape created instance `w682hq9a`; `GET .../agent-status` came back
-  `active_harness: "pida"`. No field-placement fix needed after all.
-- **`job.prompt` correctly seeds the autonomous job's first user turn.** The goal text
-  appeared verbatim as the first `user` message in `.../pida/api/session`, and the agent
-  actually completed it correctly ("Hello! Status: ready and idle...").
-- **`pida_send` (`POST .../pida/api/chat`, `{"message": "..."}`) is confirmed.** Sent via
-  our own `/api/projects/{id}/message` manual-override endpoint; the message and the
-  agent's reply ("OK") both showed up in the real session transcript afterward.
-- **Our own heartbeat graph handled the boot window correctly, live.** The instance
-  returned `503 Instance not ready` for ~10-15s after creation; `FetchStatusNode`'s error
-  surfaced as `RunOutcome::Failed` → logged as `heartbeat_node_failed` → retried
-  automatically next tick with no crash. Once ready, the very next tick logged the correct
-  `ANTHROPIC_API_KEY not set` observation-only note.
-
-Every "high confidence, not fired live" item in the endpoint tables above should now be
-read as **confirmed live**, not just high-confidence-from-source. The only remaining
-untested mutating calls are `start`/`stop`/`rename`/`delete` on an instance (create and
-send are now both proven).
-
-Spike instance `w682hq9a` (`mfb-942cf462`) was left running per request:
-https://back-office--w682hq9a.stable.dexus.io — visible in `cadmium vape ls` /
-the vape dashboard under owner `mazzdevs`. Delete it via `cadmium vape delete w682hq9a`
-(or through mazz-flux-bot itself once the UI's delete action is wired to a project) when
-done looking at it — it is a real running pod and will otherwise sit until the reaper's
-warn→grace window (see vape's own auto-cleanup docs) eventually reaps it.
-
-## Second brain backend: OpenRouter (2026-09-03)
-
-`src/brain.rs` adds `Brain`, an enum dispatching to whichever LLM backend is configured:
-
-- `ANTHROPIC_API_KEY` set → direct Anthropic call (unchanged `anthropic_client.rs`),
-  checked first so existing setups keep working with no config change.
-- else `OPENROUTER_API_KEY` set → OpenRouter's OpenAI-compatible `/chat/completions`
-  (`OpenRouterClient`, also in `brain.rs`), model via `OPENROUTER_MODEL` (default
-  `openai/gpt-5.6-sol` — verified live on OpenRouter's `/api/v1/models` today, not
-  assumed). Any OpenRouter model id works, including routing Anthropic models through
-  OpenRouter instead of direct.
-- neither → `Brain::Disabled`, identical "observe only" behavior as before.
-
-`AppState.anthropic: Arc<AnthropicClient>` was renamed to `AppState.brain: Arc<Brain>`
-(and the same rename through `heartbeat.rs`'s node structs) since the field is no longer
-Anthropic-specific. `parse_brain_response` and the spice tests were untouched — they
-operate on the brain's raw text response regardless of which backend produced it.
-
-Not yet live-fired against OpenRouter (only startup backend-selection was smoke-tested).
-Next step if picking this up: set a real `OPENROUTER_API_KEY`, rerun the same live-spike
-pattern from the earlier section against a throwaway project, and confirm the
-`choices[0].message.content` parse actually matches what `openai/gpt-5.6-sol` returns
-(OpenAI-family models are usually well-behaved chat-completion responders, but this
-hasn't been checked against this specific model).
-
-## Settings UI + rename to "conductor" (2026-09-03)
-
-Two related changes, done together:
-
-1. **API keys are now configurable via the web UI, not just env vars.** New `settings`
-   sqlite table (key/value) + `GET/POST /api/settings`, and a Settings dialog in the
-   frontend (⚙ button, top-right). Precedence per key: DB row (set via UI) → env var →
-   unset. Anthropic wins over OpenRouter if both are configured, same as before.
-   **Resolved fresh every heartbeat tick** (`Conductor::from_sources`, not cached in
-   `AppState`) — a key saved through the UI takes effect on the very next tick, no
-   restart needed. Secrets are never echoed back to the browser once saved; the settings
-   response only carries `*_key_set: bool` + a masked `...abcd`-style last-4 preview. The
-   save form only sends fields the user actually typed into (an untouched/blank input
-   means "leave unchanged"); a dedicated "Clear key" button per field sends an explicit
-   empty string, which `db::set_setting` treats as delete. Live-tested end to end (save,
-   precedence flip, clear) — see the curl sequence in this session's history if resuming
-   with no memory of it.
-2. **Renamed the "brain" concept to "conductor"** per request — `src/brain.rs` →
-   `src/conductor.rs`, `Brain` enum → `Conductor`, `parse_brain_response` →
-   `parse_conductor_response`, test file `tests/heartbeat_brain.rs` →
-   `tests/heartbeat_conductor.rs`, etc. **Naming heads-up for future work in this repo:**
-   `cadmium`/vape already use "conductor" for something unrelated — the `--conductor` flag
-   on `cadmium vape create` and the `vape.io/cadmium-conductor` label cap the number of
-   live instances a given automation identity can hold. Different concept, same word,
-   same general problem space (both are "thing that manages vape instances") — don't
-   confuse the two if grepping across repos.
-
-`AppState` no longer holds a `brain`/`conductor` field at all — it's not a cached value,
-it's resolved on demand (heartbeat ticks, `GET /api/settings`) directly from DB+env.
-
-## Human tasks, project notes, project detail page, view toggle (2026-09-03)
-
-### Bug fix (found while building this): status/heartbeat_enabled clobber
-
-`db::set_heartbeat_enabled` used to also force `status` to `running`/`paused` as a side
-effect. `persist_tick`'s `mark_done`/`mark_error` branches called
-`set_project_status(Done/Error)` immediately followed by `set_heartbeat_enabled(false)` —
-the second call silently overwrote `status` back to `'paused'`. **Every prior
-`mark_done`/`mark_error` in this project's history ended up persisted as `'paused'`, not
-`'done'`/`'error'`.** Fixed by decoupling: `set_heartbeat_enabled` now only touches the
-boolean column; a new `set_project_status_only` (status without touching `last_note`) is
-used by the API's `start`/`pause` handlers, which previously relied on the old
-side-effecting behavior. Verified fixed via a full real-pipeline run (see below) — a
-`mark_done` now correctly persists as `status: "done"`.
-
-### New conductor action: `create_human_task`
-
-Decision gains a fifth action alongside wait/send_message/mark_done/mark_error. When the
-conductor judges a blocker needs a person (missing credentials, ambiguous authority,
-needs approval), it responds with `{"action": "create_human_task", "message": "<what's
-needed>", ...}`. This creates a row in a new `human_tasks` table, flips the project to a
-new `ProjectStatus::Blocked`, and disables the heartbeat (same shutdown pattern as
-done/error) so it doesn't keep re-raising the same blocker every tick. A human resolves it
-via `POST /api/human-tasks/{id}/resolve` (dashboard panel or project detail page) and
-separately clicks Start to resume — resolving doesn't auto-resume, by design (a person
-should decide when to re-engage, not just tick the box).
-
-### New conductor action: `add_note`
-
-Independent of `action` — the conductor can attach a markdown note to any decision
-(including `wait`) via `{"add_note": "..."}`. Persisted verbatim to a new `project_notes`
-table (plain text in sqlite, no rendering/file storage — deliberately simple per request).
-Surfaced on the project detail page as a reverse-chronological list, each rendered in a
-`<pre>` block (no markdown-to-HTML rendering added — out of scope for now, content is
-still just plain text so it's fully readable as-is).
-
-### Project detail page (`/project.html?id=...`)
-
-New static page + `project.js`, linked from every project row/tile on the dashboard.
-Shows: status/constellation/instance, **explicit heartbeat_enabled + last_heartbeat_at +
-last_note** (the specific ask — "surface when heartbeats run"), a manual message-send
-box, this project's human tasks (open + resolved), its notes, live pida status + recent
-session messages (reuses the existing `/api/instances/{id}/status`+`/session`
-endpoints), and its action log filtered to this project — which **doubles as the
-heartbeat activity feed**, since every tick (including no-op ticks) already logs there.
-No separate heartbeat-run table was added; the existing action_log already is that record.
-
-### Dashboard: list/tile view toggle + human tasks panel
-
-Two icon buttons (☰ list / ▦ tiles) next to the Projects heading switch the display
-between the existing table and a new card-grid view (`.project-tile`); preference persisted
-in `localStorage` so it survives reloads. A new dashboard-wide "Human tasks" panel (with a
-red count badge) lists every open blocker across all projects with a Resolve button,
-resolving the same way as the per-project list.
-
-(Note: while implementing this, found `index.html`/`app.js`/`style.css` had already been
-edited in parallel — "New project" had been converted from an inline form into its own
-`<dialog>` with a `+` toggle button. Built on top of that rather than reverting it.)
-
-### Verification
-
-Full end-to-end test through the **real** conductor pipeline (not simulated) using two
-local mock HTTP servers: one standing in for vape-manager (`CADMIUM_VAPE_URL` override,
-serves create/agent-status/pida-status/session/chat), one standing in for OpenRouter
-(new `OPENROUTER_API_URL` override, added specifically to make this possible — mirrors
-`CADMIUM_VAPE_URL`'s existing pattern, kept in the codebase as a general testing hook).
-Confirmed live: create_instance → fetch_status → decide (mock returns create_human_task +
-add_note) → human_tasks row created, project_notes row created, status→`blocked`,
-heartbeat disabled, both actions logged with correct detail. Then resumed the project,
-mock's second scripted response (`mark_done` + a second `add_note`) confirmed the
-status-clobber fix for real: final `status: "done"`, `last_note: "goal achieved"`,
-`heartbeat_enabled: false`, two notes present in order.
-
-### Confidence notes
-
-- `create_human_task`/`add_note` were exercised via a scripted mock LLM response, not a
-  real Anthropic/OpenRouter call — the JSON contract itself (what the real model actually
-  outputs) is unverified beyond the existing spice tests, which only cover
-  parsing/fallback safety, not whether a real model reliably uses these two new fields
-  correctly. Worth a real-key spike (same pattern as the vape spike) before trusting this
-  in anger with production goals.
-- No markdown rendering was added for notes — they display as plain preformatted text.
-  If that's not enough, revisit with a minimal client-side markdown renderer.
+# Plan: file browser tab for the state directory
+
+Continues on branch `pida/run-in-flux-inference` (file store already landed — see
+earlier sections of this file for that work). Two asks:
+
+1. **Project-scoped + global action logs** — already done. `GET /api/log?project_id=X`
+   (used on the project detail page) and `GET /api/log` with no filter (dashboard-wide,
+   already on `index.html`) both exist today. No new work needed here; will just confirm
+   both still work after other changes in this pass and call it out to the user rather
+   than silently skip it.
+
+2. **A file-browser tab for the state directory** — read/edit every `.md`/`.json` under
+   `mazz-flux-bot-state/` (projects, notes, human_tasks, action_log, settings.json,
+   cache/) directly from the web UI, as a new top-level tab alongside the existing
+   Projects dashboard.
+
+## API additions (`src/api.rs`, new `files` module or just more handlers)
+
+All paths are scoped to `state.store.root()` and defended against traversal — reject any
+requested path that escapes the root after normalization (`..`, absolute paths, symlink
+escape). This is a local single-user dev tool but the store now literally holds an
+editable filesystem window, so path-escape is the one thing worth being careful about.
+
+- `GET /api/files?path=<relative>` — if `path` is a directory (or omitted, meaning root):
+  return `{"type":"dir","entries":[{"name","path","is_dir","size","modified_at"}]}`
+  sorted directories-first then name. If `path` is a file: return
+  `{"type":"file","path","content","size","modified_at"}` — content read as UTF-8 (files
+  in this store are always JSON or markdown, so this is safe); non-UTF8 or oversized
+  (>2MB, to stop someone pointing this at something huge) returns an error instead of
+  garbling/hanging the UI.
+- `PUT /api/files?path=<relative>` body `{"content": "..."}` — overwrites the file via
+  the same atomic write-then-rename helper already in `store.rs` (exposed as a small pub
+  fn, e.g. `store::write_file_atomic`, reused here instead of duplicating the tmp-rename
+  dance). Creates parent directories if missing (lets the file browser also be used to
+  add new ad-hoc notes by typing a path that doesn't exist yet). Rejects writes outside
+  the root the same way GET does.
+- `DELETE /api/files?path=<relative>` — removes a file (not a whole directory, to keep
+  this low-risk — deleting a project's whole folder isn't a feature this adds).
+- No new create-project-note-via-file-browser affordance beyond "PUT a new path" — good
+  enough, no special-cased "new file" button needed beyond a text input for the path.
+
+These live directly on `Store` as thin wrappers (`Store::browse(rel_path)`,
+`Store::read_file(rel_path)`, `Store::write_file(rel_path, content)`,
+`Store::delete_file(rel_path)`) so the path-safety check has one implementation, reused
+by both the HTTP handlers and (later, if wanted) the CLI.
+
+## Frontend: new "Files" tab
+
+`index.html` gets a simple tab strip at the top of `<main>` — "Projects" (existing
+content, default) / "Files" (new). Vanilla show/hide via a `data-tab` attribute + one
+small JS toggle, no router needed (single page, no navigation state worth persisting
+beyond `localStorage` like the existing list/tile toggle already does).
+
+Files tab layout: a breadcrumb-style path header, a directory listing (click a row to
+navigate into a dir or open a file), and a simple textarea-based editor pane for the
+currently open file with Save/Delete/Revert buttons — no need for a rich markdown/JSON
+editor, this is an ops tool not an IDE. JSON files get a "format" button that
+round-trips through `JSON.parse`/`JSON.stringify(…, null, 2)` client-side before saving
+(catches typos before they hit disk) but the raw textarea content is always what's
+authoritative if that button isn't used.
+
+New `static/files.js` (kept separate from `app.js` to avoid one more giant file) wires:
+`loadDir(path)`, `openFile(path)`, `saveFile()`, `deleteFile()`, breadcrumb click
+navigation, and an "up one level" control.
+
+## Execution order
+
+1. `src/store.rs`: add `browse`/`read_file`/`write_file`/`delete_file` with the shared
+   path-safety normalization helper.
+2. `src/api.rs`: `GET/PUT/DELETE /api/files` handlers; register routes in `main.rs`.
+3. `static/index.html`: tab strip, new `<section id="files">` markup (breadcrumb + listing
+   + editor pane), confirm existing Action log section markup/copy still makes sense
+   labeled as "global" now that Files exists as a sibling concept.
+4. `static/files.js`: directory/file fetch+render+edit logic.
+5. `static/style.css`: minimal styling for tabs, breadcrumbs, file listing rows, editor
+   textarea.
+6. Manual smoke test: browse into `projects/`, open a project json, edit+save, confirm
+   change round-trips via `GET /api/projects/:id`; open a note `.md`, confirm the leading
+   `<!-- created_at: ... -->` comment is visible (expected — the browser shows the raw
+   file, not the parsed `ProjectNote.content`); attempt a path-escape (`../../etc/passwd`
+   style) and confirm it's rejected.
+7. Re-verify both action-log surfaces (global on dashboard, project-scoped on project
+   detail page) still return correct data — no code change expected there, just a
+   confirmation pass.
+
+## Executed (2026-09-03) — file browser tab + live-by-default + confirmed logs
+
+- **Action logs were already project-scoped and global** (`GET /api/log?project_id=X` on
+  the project detail page, `GET /api/log` unfiltered on the dashboard) — no change
+  needed, confirmed working end to end against a real running project.
+- **File browser**: `Store::browse`/`write_file`/`delete_file` (src/store.rs) with a
+  shared `resolve_path` helper that rejects `..`/absolute paths and any dotfile/dotdir
+  component (blocks `.git` specifically — the state repo's own git metadata must never
+  be reachable through this API) plus a canonicalize-based symlink-escape check.
+  `GET/PUT/DELETE /api/files?path=...` wired in `api.rs`/`main.rs`. New "Files" tab on the
+  dashboard (`static/files.js`, tab-strip markup in `index.html`, styling in
+  `style.css`) — breadcrumb navigation, directory listing, textarea editor with
+  Save/Revert/Delete and a JSON-format helper. Verified live: browsed into `projects/`,
+  read a real running project's JSON, edited it via `PUT`, confirmed the change through
+  the normal `/api/projects/:id` endpoint, then restored it.
+- **`MAZZ_FLUX_LIVE` is now live by default** — flipped from opt-in (`=1` to go live) to
+  opt-out (`=0` to force dry-run). No env var needs to be set at all for the bot to
+  actually create/steer real vape instances now; confirmed live in this session (project
+  `test-chat` got a real instance, `obbpisa2`, created without `MAZZ_FLUX_LIVE` set
+  anywhere in the environment).
+- Added `tests/store_smoke.rs::file_browser_reads_writes_and_blocks_escapes` covering
+  write/read/edit/delete round-trips plus both escape classes (`../`, `.git`).
+
+## Executed (2026-09-03) — force-heartbeat, per-project interval, relative times
+
+- **Force heartbeat button** (project detail page): `POST /api/projects/{id}/heartbeat/force`
+  → `heartbeat::force_tick`, which runs one full graph tick for that single project
+  immediately, bypassing both the `heartbeat_enabled`/`status == running` filter and the
+  per-project due-check. Verified live against the real running project — correctly ran
+  the conductor and raised a second human task.
+- **Per-project heartbeat interval, default 15 minutes**: `Project.heartbeat_interval_secs`
+  (new field, serde-defaults to 900 for old project files with no such field, so no
+  migration needed). Editable via `POST /api/projects/{id}/heartbeat-interval` (min
+  5s, clamps rather than rejects). The periodic loop's own scan cadence
+  (`HEARTBEAT_SCAN_INTERVAL_SECS`, default 15s) is now a separate concept from any one
+  project's interval — the scan loop wakes up frequently and only actually ticks a
+  project once `is_due()` says its own interval has elapsed since `last_heartbeat_at`.
+- **Countdown timer** on the project detail page: computed client-side from
+  `last_heartbeat_at` (or `created_at` if never ticked) + `heartbeat_interval_secs`,
+  re-rendered every second independent of the 5s data poll.
+- **Relative time formatting** (`formatRelative`, "4 minutes ago" / "in 3m 20s" style) —
+  added to both `app.js` (dashboard action log) and `project.js` (overview table's
+  created/last-heartbeat fields, heartbeat activity log). Raw ISO timestamp kept in a
+  `title` attribute for hover.
+- Store test coverage extended: default interval, custom interval round-trip, and the
+  5s-minimum clamp.

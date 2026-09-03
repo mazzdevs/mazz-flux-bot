@@ -16,6 +16,34 @@ async function api(path, opts) {
   return body;
 }
 
+function formatRelative(iso) {
+  if (!iso) return "never";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return iso;
+  const diffMs = Date.now() - then;
+  const future = diffMs < 0;
+  const abs = Math.abs(diffMs);
+  const sec = Math.round(abs / 1000);
+  const units = [
+    ["year", 31536000],
+    ["month", 2592000],
+    ["day", 86400],
+    ["hour", 3600],
+    ["minute", 60],
+    ["second", 1],
+  ];
+  if (sec < 5) return future ? "in a moment" : "just now";
+  let label = `${sec}s`;
+  for (const [name, secs] of units) {
+    const count = Math.floor(sec / secs);
+    if (count >= 1) {
+      label = `${count} ${name}${count === 1 ? "" : "s"}`;
+      break;
+    }
+  }
+  return future ? `in ${label}` : `${label} ago`;
+}
+
 function statusClass(status) {
   if (status === "running") return "status-running";
   if (status === "error") return "status-error";
@@ -93,9 +121,9 @@ async function loadLog() {
   logList.innerHTML = (entries || [])
     .map(
       (e) =>
-        `<li><span class="action">${escapeHtml(e.action)}</span><span class="ts">${escapeHtml(e.created_at)}</span><br/>${escapeHtml(
-          e.error || e.result || ""
-        ).slice(0, 200)}</li>`
+        `<li><span class="action">${escapeHtml(e.action)}</span><span class="ts" title="${escapeHtml(e.created_at)}">${escapeHtml(
+          formatRelative(e.created_at)
+        )}</span><br/>${escapeHtml(e.error || e.result || "").slice(0, 200)}</li>`
     )
     .join("");
 }
@@ -275,3 +303,19 @@ async function tick() {
 loadConstellations();
 tick();
 setInterval(tick, 5000);
+
+// ---- Top-level tab strip (Dashboard / Files) ---------------------------
+
+const TAB_KEY = "mfb-active-tab";
+const tabButtons = document.querySelectorAll(".tab-btn");
+const tabPanels = document.querySelectorAll(".tab-panel");
+
+function applyTab(tab) {
+  tabButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
+  tabPanels.forEach((panel) => panel.classList.toggle("active", panel.id === `tab-panel-${tab}`));
+  localStorage.setItem(TAB_KEY, tab);
+  if (tab === "files" && window.filesTab) window.filesTab.onShow();
+}
+
+tabButtons.forEach((btn) => btn.addEventListener("click", () => applyTab(btn.dataset.tab)));
+applyTab(localStorage.getItem(TAB_KEY) || "dashboard");
