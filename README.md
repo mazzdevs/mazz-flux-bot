@@ -2,6 +2,9 @@
 
 **An autonomous orchestrator that drives coding-agent instances toward a goal — heartbeat by heartbeat, forever, until it's done.**
 
+
+<img width="1144" height="765" alt="image" src="https://github.com/user-attachments/assets/b1bdbe28-8ea6-43b0-b9ac-2d177143f756" />
+
 You describe what you want built or fixed. mazz-flux-bot spins up a live [VAPE](#what-is-vape) instance running the [`pida`](#what-is-pida) coding-agent harness, gives it a real, LLM-composed opening directive, then checks in on a schedule you control — reading its progress, deciding whether to steer it, mark it done, flag an error, or raise a human task — compacting everything it learns into a running memory so it never needs to re-read the whole history to know what's going on.
 
 It runs *inside* a VAPE instance itself, using that instance's own inference credentials — no external database, no cloud service, just flat files and a single static binary.
