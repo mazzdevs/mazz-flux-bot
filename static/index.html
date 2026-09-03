@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>mazz-flux-bot</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css?v=2" />
   <script>
     // Set the theme before first paint to avoid a flash of the wrong theme.
     (function () {
@@ -30,19 +30,54 @@
     </div>
   </header>
 
-  <dialog id="archetype-dialog">
+  <dialog id="archetype-dialog" data-mode="create" aria-labelledby="archetype-dialog-title" aria-describedby="archetype-dialog-description">
     <form id="archetype-form">
-      <h2><svg class="icon"><use href="/icons.svg#icon-users"></use></svg> <span id="archetype-dialog-title">New archetype</span></h2>
+      <div class="archetype-dialog-header">
+        <div class="archetype-dialog-icon" aria-hidden="true">
+          <svg class="icon"><use href="/icons.svg#icon-users"></use></svg>
+        </div>
+        <div>
+          <div class="archetype-dialog-kicker">
+            Agent persona <span id="archetype-mode-badge" class="archetype-mode-badge">Create</span>
+          </div>
+          <h2 id="archetype-dialog-title">New archetype</h2>
+          <p id="archetype-dialog-description" class="archetype-dialog-description">Define a reusable specialist the conductor can recommend for focused work.</p>
+        </div>
+      </div>
+
       <input type="hidden" id="archetype-slug" />
-      <label>Name</label>
-      <input type="text" id="archetype-name" placeholder="e.g. Coder" required />
-      <label>Preferred model</label>
-      <input type="text" id="archetype-model" placeholder="openai/gpt-5.6-sol-pro" />
-      <label>Description</label>
-      <textarea id="archetype-description" placeholder="what this persona does, and how it approaches work" required></textarea>
+      <div class="archetype-form-fields">
+        <div class="archetype-field">
+          <label for="archetype-name">Name <span class="required-marker" aria-hidden="true">*</span></label>
+          <input type="text" id="archetype-name" placeholder="e.g. Security reviewer" autocomplete="off" required />
+          <p class="field-help">Use a short role name that is easy to reference in a plan.</p>
+        </div>
+
+        <div class="archetype-field">
+          <label for="archetype-description">Instructions <span class="required-marker" aria-hidden="true">*</span></label>
+          <textarea id="archetype-description" rows="7" placeholder="Describe this specialist’s responsibilities, working style, and what a strong result looks like…" required></textarea>
+          <p class="field-help">Be specific about how this persona approaches work—not just what it produces.</p>
+        </div>
+
+        <div class="archetype-field archetype-model-field">
+          <div class="field-label-row">
+            <label for="archetype-model">Preferred model</label>
+            <span class="optional-label">Optional</span>
+          </div>
+          <input type="text" id="archetype-model" class="mono" placeholder="openai/gpt-5.6-sol-pro" spellcheck="false" autocomplete="off" />
+          <div class="model-default-note">
+            <svg class="icon" aria-hidden="true"><use href="/icons.svg#icon-note"></use></svg>
+            <span>Leave blank to use the archetype default: <code>openai/gpt-5.6-sol-pro</code></span>
+          </div>
+        </div>
+      </div>
+
       <div class="dialog-actions">
         <button type="button" id="archetype-close" class="btn-secondary">Cancel</button>
-        <button type="submit" class="btn">Save</button>
+        <button type="submit" id="archetype-submit" class="btn">
+          <svg class="icon"><use href="/icons.svg#icon-plus"></use></svg>
+          <span id="archetype-submit-label">Create archetype</span>
+        </button>
       </div>
     </form>
   </dialog>
@@ -132,11 +167,6 @@
         <div id="projects-tiles" class="projects-tiles"></div>
       </section>
 
-      <section id="human-tasks">
-        <h2><svg class="icon"><use href="/icons.svg#icon-alert"></use></svg> Human tasks <span class="badge" id="human-tasks-count"></span></h2>
-        <ul id="human-tasks-list" class="human-tasks-list"></ul>
-      </section>
-
       <section id="log">
         <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Action log (global)</h2>
         <ul id="log-list"></ul>
@@ -194,8 +224,8 @@
   </main>
 
   <script src="/theme.js"></script>
-  <script src="/app.js"></script>
-  <script src="/archetypes.js"></script>
+  <script src="/app.js?v=2"></script>
+  <script src="/archetypes.js?v=2"></script>
   <script src="/files.js"></script>
 </body>
 </html>

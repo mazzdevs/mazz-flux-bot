@@ -3,8 +3,6 @@ const projectsTiles = document.getElementById("projects-tiles");
 const projectsTable = document.getElementById("projects-table");
 const logList = document.getElementById("log-list");
 const constellationsList = document.getElementById("constellations");
-const humanTasksList = document.getElementById("human-tasks-list");
-const humanTasksCount = document.getElementById("human-tasks-count");
 
 async function api(path, opts) {
   const res = await fetch(path, {
@@ -79,8 +77,14 @@ function projectActionsHtml(p) {
 }
 
 async function loadProjects() {
-  const { projects } = await api("/api/projects");
+  const [{ projects }, { entries }] = await Promise.all([api("/api/projects"), api("/api/human-tasks")]);
   const list = projects || [];
+  const taskCounts = (entries || [])
+    .filter((task) => task.status === "open" && !task.resolved_at)
+    .reduce((counts, task) => {
+      counts.set(task.project_id, (counts.get(task.project_id) || 0) + 1);
+      return counts;
+    }, new Map());
 
   projectsBody.innerHTML = list
     .map((p) => {
@@ -101,10 +105,18 @@ async function loadProjects() {
   projectsTiles.innerHTML = list
     .map((p) => {
       const instance = p.vape_instance_id ? `<code>${escapeHtml(p.vape_instance_id)}</code>` : "none yet";
+      const taskCount = taskCounts.get(p.id) || 0;
+      const taskLabel = `${taskCount} human task${taskCount === 1 ? "" : "s"}`;
+      const taskBadge = taskCount
+        ? `<span class="human-task-badge" aria-label="${taskLabel}" title="${taskLabel}"><svg class="icon" aria-hidden="true"><use href="/icons.svg#icon-alert"></use></svg>${taskCount}</span>`
+        : "";
       return `<div class="project-tile">
         <div class="tile-head">
           <a class="project-link" href="/project.html?id=${p.id}"><strong>${escapeHtml(p.name)}</strong></a>
-          <span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span>
+          <div class="tile-badges">
+            <span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span>
+            ${taskBadge}
+          </div>
         </div>
         <div class="goal">${escapeHtml(p.goal)}</div>
         <div class="tile-instance">instance: ${instance}</div>
@@ -126,40 +138,6 @@ async function loadLog() {
     )
     .join("");
 }
-
-async function loadHumanTasks() {
-  const { entries } = await api("/api/human-tasks");
-  const tasks = entries || [];
-  humanTasksCount.textContent = tasks.length || "";
-  humanTasksCount.classList.toggle("zero", tasks.length === 0);
-  humanTasksCount.classList.toggle("badge", tasks.length > 0);
-
-  humanTasksList.innerHTML = tasks.length
-    ? tasks
-        .map(
-          (t) => `<li>
-            <div class="task-desc">
-              <a class="project-link" href="/project.html?id=${t.project_id}">${escapeHtml(t.project_name || t.project_id)}</a>:
-              ${escapeHtml(t.description)}
-              <div class="task-meta">${escapeHtml(t.created_at)}</div>
-            </div>
-            <button class="btn-secondary" data-resolve="${t.id}"><svg class="icon"><use href="/icons.svg#icon-check"></use></svg> Resolve</button>
-          </li>`
-        )
-        .join("")
-    : `<li class="empty">No open human tasks.</li>`;
-}
-
-humanTasksList.addEventListener("click", async (ev) => {
-  const btn = ev.target.closest("button[data-resolve]");
-  if (!btn) return;
-  try {
-    await api(`/api/human-tasks/${btn.dataset.resolve}/resolve`, { method: "POST" });
-    await Promise.all([loadHumanTasks(), loadProjects()]);
-  } catch (e) {
-    alert(e.message);
-  }
-});
 
 function bindProjectActions(container) {
   container.addEventListener("click", async (ev) => {
@@ -232,7 +210,7 @@ applyView(localStorage.getItem(VIEW_KEY) || "list");
 
 async function tick() {
   try {
-    await Promise.all([loadProjects(), loadLog(), loadHumanTasks()]);
+    await Promise.all([loadProjects(), loadLog()]);
   } catch (e) {
     console.error(e);
   }
