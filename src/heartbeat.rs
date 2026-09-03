@@ -114,11 +114,20 @@ pub struct Decision {
     /// jot down what it found). See `ProjectNote`.
     #[serde(default)]
     pub add_note: Option<String>,
+    /// The conductor's fully rewritten, self-contained compacted summary for
+    /// this tick — REPLACES whatever was in `memory/{project_id}.md` before
+    /// (see `Store::write_memory`), independent of `action`. Distinct from
+    /// `add_note`: notes are an append-only historical log worth permanently
+    /// keeping; memory is "worth remembering right now" and is expected to
+    /// be overwritten every tick. `None`/absent leaves the existing memory
+    /// file untouched (e.g. a conductor that doesn't support this field yet).
+    #[serde(default)]
+    pub memory: Option<String>,
 }
 
 impl Decision {
     fn wait(note: impl Into<String>) -> Self {
-        Decision { action: "wait".to_string(), message: None, tasks: None, note: Some(note.into()), add_note: None }
+        Decision { action: "wait".to_string(), message: None, tasks: None, note: Some(note.into()), add_note: None, memory: None }
     }
 }
 
@@ -151,17 +160,28 @@ fn strip_markdown_fence(s: &str) -> &str {
 }
 
 const SYSTEM_PROMPT: &str = "You are an autonomous orchestrator managing a single 'pida' coding-agent \
-    instance on behalf of a developer, working toward one stated goal. Each tick you see \
-    the instance's current status and the most recent chat turns. Respond with ONLY a JSON \
-    object (no markdown fences, no prose) of the shape: \
+    instance on behalf of a developer, working toward one stated goal. Each tick you see the \
+    project's overall `goal` (always keep this in mind), an optional `heartbeat_prompt` (guidance \
+    for what THIS check-in specifically should focus on, if set), your own `memory` from the \
+    previous tick (a compacted summary you wrote — empty on the first tick), and the instance's \
+    current status and most recent chat turns. Respond with ONLY a JSON object (no markdown \
+    fences, no prose) of the shape: \
     {\"action\": \"wait\" | \"send_message\" | \"mark_done\" | \"mark_error\" | \"create_human_task\", \
-    \"message\": \"<only for send_message (steering text), or create_human_task with exactly ONE blocker>\", \
+    \"message\": \"<only for send_message, or create_human_task with exactly ONE blocker — for \
+    send_message, COMPOSE this yourself in your own words using heartbeat_prompt (if set) and \
+    memory as guidance, while keeping goal in mind — never just restate heartbeat_prompt or goal \
+    verbatim>\", \
     \"tasks\": [\"<blocker 1>\", \"<blocker 2>\", ...] (only for create_human_task — use this instead of \
     message when the agent's reply lists two or more DISTINCT blockers, e.g. a numbered list of \
     separate asks. Each entry becomes its own independently-resolvable task — never merge several \
     unrelated blockers into one message string), \
     \"note\": \"<short human-readable reason>\", \
-    \"add_note\": \"<optional markdown, any action — your own running notes on this project>\"}. \
+    \"add_note\": \"<optional markdown, any action — your own permanent, append-only running notes>\", \
+    \"memory\": \"<a fully rewritten, self-contained compacted summary of everything worth \
+    remembering about this project's progress, decisions, and state — include this on every \
+    response. This REPLACES your previous memory entirely, so carry forward anything still \
+    relevant rather than assuming it persists on its own. Keep it concise — this is what lets \
+    you avoid re-reading full history every tick.>\"}. \
     Use send_message to steer the agent or answer a pending question in prose. Use mark_done \
     only when the transcript clearly shows the goal is achieved. Use mark_error only when the \
     agent is stuck in a way a message can't fix. Use create_human_task when you hit a blocker \
@@ -171,8 +191,8 @@ const SYSTEM_PROMPT: &str = "You are an autonomous orchestrator managing a singl
     IMPORTANT: if the agent's reply enumerates multiple separate blockers (numbered or bulleted), \
     split them into distinct entries in `tasks` rather than one combined `message` — this lets a \
     human resolve each one independently. Use add_note on any tick (including wait) to record \
-    findings, context, or progress worth keeping — it does not change what action is taken. \
-    Prefer wait when unsure.";
+    findings, context, or progress worth keeping permanently — it does not change what action \
+    is taken. Prefer wait when unsure.";
 
 #[derive(Debug, Clone)]
 pub(crate) enum TickOutcome {
@@ -194,6 +214,7 @@ pub(crate) struct HeartbeatState {
     project_id: String,
     project_name: String,
     goal: String,
+    heartbeat_prompt: Option<String>,
     constellation: String,
     vape_instance_id: Option<String>,
     harness: Option<String>,
@@ -203,6 +224,14 @@ pub(crate) struct HeartbeatState {
     outcome: Option<TickOutcome>,
     note: Option<String>,
     add_note: Option<String>,
+    /// The conductor's rewritten memory for THIS tick (from `Decision.memory`),
+    /// persisted by `persist_tick` regardless of which action was taken —
+    /// same treatment as `add_note`. Not the same field as `memory` above
+    /// (that's last tick's, read-only input; this is this tick's, write-only
+    /// output) — kept separate rather than overwritten in place so
+    /// `persist_tick` can tell "no update this tick" (`None`) apart from
+    /// "explicitly cleared" if that's ever needed.
+    new_memory: Option<String>,
 }
 
 pub(crate) enum Update {
@@ -210,7 +239,7 @@ pub(crate) enum Update {
     InstanceCreated(String),
     StatusFetched { harness: String, pida_status: Option<PidaStatus>, messages: Vec<serde_json::Value> },
     Decided(Decision),
-    ActionTaken(TickOutcome, Option<String>, Option<String>),
+    ActionTaken(TickOutcome, Option<String>, Option<String>, Option<String>),
     Noted(String),
 }
 
@@ -226,10 +255,11 @@ impl Reducer for HeartbeatState {
                 self.recent_messages = messages;
             }
             Update::Decided(d) => self.decision = Some(d),
-            Update::ActionTaken(outcome, note, add_note) => {
+            Update::ActionTaken(outcome, note, add_note, new_memory) => {
                 self.outcome = Some(outcome);
                 self.note = note;
                 self.add_note = add_note;
+                self.new_memory = new_memory;
             }
             Update::Noted(note) => self.note = Some(note),
         }
@@ -313,6 +343,22 @@ async fn try_llm_slug(conductor: &Conductor, project_name: &str, goal: &str) -> 
     }
 }
 
+/// Best-effort: asks the conductor to compose the initial session prompt in
+/// its own words (see `Conductor::compose_initial_prompt`). Falls back to
+/// sending `goal` verbatim on any failure/empty response — must never block
+/// instance creation. Returns `(prompt, source)` for logging.
+async fn compose_initial_prompt(conductor: &Conductor, project_name: &str, goal: &str) -> (String, &'static str) {
+    if conductor.enabled() {
+        if let Ok(text) = conductor.compose_initial_prompt(project_name, goal).await {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return (trimmed.to_string(), "llm_composed");
+            }
+        }
+    }
+    (goal.to_string(), "verbatim_goal_fallback")
+}
+
 #[async_trait::async_trait]
 impl Node<HeartbeatState> for CreateInstanceNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
@@ -322,13 +368,14 @@ impl Node<HeartbeatState> for CreateInstanceNode {
         };
 
         let model = crate::conductor::resolve_model(&self.store, "instance_model", "MAZZ_FLUX_INSTANCE_MODEL", crate::conductor::DEFAULT_MODEL).await;
+        let (prompt, prompt_source) = compose_initial_prompt(&self.conductor, &state.project_name, &state.goal).await;
 
         let req = CreateInstanceRequest {
             name,
             constellation: state.constellation.clone(),
             subdomain: None,
             ticket: None,
-            job: Some(JobConfig { prompt: state.goal.clone(), harness: Some("pida".to_string()), model: Some(model) }),
+            job: Some(JobConfig { prompt, harness: Some("pida".to_string()), model: Some(model) }),
         };
 
         let resp = self.vape.create_instance(&req).await.map_err(node_err("create_instance"))?;
@@ -336,6 +383,10 @@ impl Node<HeartbeatState> for CreateInstanceNode {
         let _ = self
             .store
             .log_action(Some(&state.project_id), None, "instance_name_chosen", Some(&serde_json::json!({"name": req.name, "source": naming_source})), None, None)
+            .await;
+        let _ = self
+            .store
+            .log_action(Some(&state.project_id), None, "instance_prompt_composed", Some(&serde_json::json!({"source": prompt_source})), None, None)
             .await;
 
         if resp.get("dry_run").is_some() {
@@ -417,8 +468,12 @@ impl Node<HeartbeatState> for DecideNode {
             _ => SYSTEM_PROMPT.to_string(),
         };
 
+        let memory = self.store.read_memory(&state.project_id).await.unwrap_or(None);
+
         let user = serde_json::json!({
             "goal": state.goal,
+            "heartbeat_prompt": state.heartbeat_prompt,
+            "memory": memory,
             "pida_status": state.pida_status,
             "recent_messages": state.recent_messages,
         })
@@ -446,23 +501,24 @@ impl Node<HeartbeatState> for ActNode {
 
         let note = decision.note.clone();
         let add_note = decision.add_note.clone();
+        let new_memory = decision.memory.clone();
 
         match decision.action.as_str() {
             "send_message" => {
                 let message = decision.message.clone().unwrap_or_default();
                 if message.is_empty() {
                     warn!(project_id = %state.project_id, "conductor said send_message with no message body — treating as wait");
-                    return Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, note, add_note)));
+                    return Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, note, add_note, new_memory.clone())));
                 }
                 let instance_id = state.vape_instance_id.as_deref().ok_or_else(|| GraphError::Node {
                     node: "act".to_string(),
                     message: "send_message with no instance id".to_string(),
                 })?;
                 self.vape.pida_send(instance_id, &message).await.map_err(node_err("act"))?;
-                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Sent(message), note, add_note)))
+                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Sent(message), note, add_note, new_memory.clone())))
             }
-            "mark_done" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Done, note, add_note))),
-            "mark_error" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Error, note, add_note))),
+            "mark_done" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Done, note, add_note, new_memory.clone()))),
+            "mark_error" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Error, note, add_note, new_memory.clone()))),
             "create_human_task" => {
                 // Prefer `tasks` (one or more discrete blockers) over the
                 // legacy single-`message` shape — lets the conductor split a
@@ -473,9 +529,9 @@ impl Node<HeartbeatState> for ActNode {
                     Some(tasks) if !tasks.is_empty() => tasks.iter().filter(|t| !t.trim().is_empty()).cloned().collect(),
                     _ => vec![decision.message.clone().unwrap_or_else(|| note.clone().unwrap_or_else(|| "conductor requested human intervention".to_string()))],
                 };
-                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Blocked(descriptions), note, add_note)))
+                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Blocked(descriptions), note, add_note, new_memory.clone())))
             }
-            _ => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, note, add_note))),
+            _ => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, note, add_note, new_memory.clone()))),
         }
     }
 }
@@ -575,6 +631,7 @@ async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, 
         project_id: project.id.clone(),
         project_name: project.name.clone(),
         goal: project.goal.clone(),
+        heartbeat_prompt: project.heartbeat_prompt.clone(),
         constellation: project.constellation.clone(),
         vape_instance_id: project.vape_instance_id.clone(),
         harness: None,
@@ -584,6 +641,7 @@ async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, 
         outcome: None,
         note: None,
         add_note: None,
+        new_memory: None,
     };
 
     match executor.run(initial, &project.id).await? {
@@ -635,6 +693,16 @@ async fn persist_tick(state: &AppState, project: &Project, final_state: &Heartbe
         if !note_md.is_empty() {
             state.store.add_project_note(&project.id, note_md).await?;
             state.store.log_action(Some(&project.id), instance_id, "add_note", None, Some(&format!("{} chars", note_md.len())), None).await?;
+        }
+    }
+
+    // Also persisted regardless of which action was taken — see
+    // Decision::memory. Unlike add_note this REPLACES the file, it never
+    // appends (that's the whole point of the compaction mechanism).
+    if let Some(memory_md) = &final_state.new_memory {
+        if !memory_md.is_empty() {
+            state.store.write_memory(&project.id, memory_md).await?;
+            state.store.log_action(Some(&project.id), instance_id, "memory_updated", None, Some(&format!("{} chars", memory_md.len())), None).await?;
         }
     }
 

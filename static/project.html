@@ -87,6 +87,29 @@
       </table>
     </section>
 
+    <section id="prompts">
+      <h2><svg class="icon"><use href="/icons.svg#icon-note"></use></svg> Prompts</h2>
+
+      <label class="prompt-label">Goal prompt</label>
+      <p class="sub">Direction for the conductor's own opening message to the agent — not sent verbatim.</p>
+      <form id="goal-form" class="prompt-form">
+        <textarea id="goal-input"></textarea>
+        <button type="submit" class="btn-secondary">Save goal</button>
+        <span id="goal-status" class="files-status"></span>
+      </form>
+
+      <label class="prompt-label">Heartbeat prompt (optional)</label>
+      <p class="sub">Direction for periodic check-ins — the conductor composes the actual message, keeping the goal in mind too.</p>
+      <form id="heartbeat-prompt-form" class="prompt-form">
+        <textarea id="heartbeat-prompt-input" placeholder="leave blank to let the conductor use judgment from goal + status alone"></textarea>
+        <button type="submit" class="btn-secondary">Save heartbeat prompt</button>
+        <span id="heartbeat-prompt-status" class="files-status"></span>
+      </form>
+
+      <label class="prompt-label">Memory <span class="sub">(conductor's own compacted summary, overwritten every tick — not editable)</span></label>
+      <pre id="memory-body" class="memory-body">No memory yet.</pre>
+    </section>
+
     <section id="instance-status">
       <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Live instance status</h2>
       <div id="instance-status-body" class="sub">No instance yet.</div>

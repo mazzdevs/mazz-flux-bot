@@ -14,6 +14,8 @@
 //! <root>/
 //!   projects/<project_id>.json
 //!   notes/<project_id>/<rfc3339>__<uuid8>.md
+//!   memory/<project_id>.md          # conductor-authored, overwritten each tick
+//!   agent_prompts/<name>.md          # user-authored, read-only from the bot's side
 //!   human_tasks/<project_id>/<task_id>.json
 //!   action_log/<yyyy-mm-dd>.ndjson
 //!   settings.json
@@ -147,6 +149,9 @@ impl Store {
     fn agent_prompt_path(&self, name: &str) -> PathBuf {
         self.root.join("agent_prompts").join(format!("{name}.md"))
     }
+    fn memory_path(&self, project_id: &str) -> PathBuf {
+        self.root.join("memory").join(format!("{project_id}.md"))
+    }
     fn instance_cache_path(&self) -> PathBuf {
         self.root.join("cache").join("instances.json")
     }
@@ -161,6 +166,7 @@ impl Store {
             id: id.clone(),
             name: req.name,
             goal: req.goal,
+            heartbeat_prompt: req.heartbeat_prompt,
             constellation: req.constellation.unwrap_or_else(|| "back-office".to_string()),
             status: ProjectStatus::Draft.as_str().to_string(),
             vape_instance_id: None,
@@ -238,6 +244,18 @@ impl Store {
     pub async fn set_heartbeat_interval(&self, id: &str, interval_secs: u64) -> Result<()> {
         let interval_secs = interval_secs.max(5);
         self.update_project(id, |p| p.heartbeat_interval_secs = interval_secs).await
+    }
+
+    pub async fn set_goal(&self, id: &str, goal: &str) -> Result<()> {
+        let goal = goal.to_string();
+        self.update_project(id, |p| p.goal = goal).await
+    }
+
+    /// Empty string clears it back to `None` ("no heartbeat-prompt guidance,
+    /// use judgment") — same convention as `Store::set_setting`.
+    pub async fn set_heartbeat_prompt(&self, id: &str, heartbeat_prompt: &str) -> Result<()> {
+        let value = if heartbeat_prompt.is_empty() { None } else { Some(heartbeat_prompt.to_string()) };
+        self.update_project(id, |p| p.heartbeat_prompt = value).await
     }
 
     pub async fn touch_heartbeat(&self, id: &str, note: Option<&str>) -> Result<()> {
@@ -374,6 +392,29 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("reading agent_prompts/{name}.md")),
         }
+    }
+
+    // ---- Project memory (conductor-authored, compacted — overwritten, not
+    // appended, every tick) ---------------------------------------------------
+
+    /// The conductor's own working summary for this project, fully rewritten
+    /// each heartbeat tick (see `heartbeat::DecideNode`) so cross-tick
+    /// continuity stays bounded instead of requiring ever-more raw history.
+    /// `Ok(None)` before the first tick that produces one.
+    pub async fn read_memory(&self, project_id: &str) -> Result<Option<String>> {
+        match fs::read_to_string(self.memory_path(project_id)).await {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading memory/{project_id}.md")),
+        }
+    }
+
+    /// Fully replaces (not appends to) the memory file — this is a
+    /// compaction mechanism, the whole point is that it never grows
+    /// unbounded.
+    pub async fn write_memory(&self, project_id: &str, content: &str) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        write_atomic(&self.memory_path(project_id), content).await
     }
 
     // ---- Settings (flat key/value map) -------------------------------------

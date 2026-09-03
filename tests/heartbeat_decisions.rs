@@ -56,3 +56,18 @@ fn create_human_task_with_single_message_still_works() {
     assert_eq!(decision.message, Some("one blocker".to_string()));
     assert_eq!(decision.tasks, None);
 }
+
+#[test]
+fn memory_field_round_trips() {
+    let raw = r#"{"action": "wait", "note": "still working", "memory": "compacted summary of progress so far"}"#;
+    let decision = parse_conductor_response(raw);
+    assert_eq!(decision.action, "wait");
+    assert_eq!(decision.memory, Some("compacted summary of progress so far".to_string()));
+}
+
+#[test]
+fn memory_field_absent_is_none() {
+    let raw = r#"{"action": "wait", "note": "still working"}"#;
+    let decision = parse_conductor_response(raw);
+    assert_eq!(decision.memory, None);
+}

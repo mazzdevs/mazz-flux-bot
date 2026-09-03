@@ -68,6 +68,11 @@ async function loadProject() {
   document.getElementById("project-goal").textContent = p.goal;
   document.title = `mazz-flux-bot — ${p.name}`;
 
+  const goalInput = document.getElementById("goal-input");
+  if (document.activeElement !== goalInput) goalInput.value = p.goal;
+  const heartbeatPromptInput = document.getElementById("heartbeat-prompt-input");
+  if (document.activeElement !== heartbeatPromptInput) heartbeatPromptInput.value = p.heartbeat_prompt || "";
+
   document.getElementById("ov-status").innerHTML = `<span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span>`;
   document.getElementById("ov-constellation").textContent = p.constellation;
   document.getElementById("ov-instance").innerHTML = p.vape_instance_id ? `<code>${escapeHtml(p.vape_instance_id)}</code>` : "none yet";
@@ -229,6 +234,23 @@ async function loadNotes() {
     : `<li class="empty">No notes yet.</li>`;
 }
 
+async function loadMemory() {
+  const el = document.getElementById("memory-body");
+  try {
+    const { memory } = await api(`/api/projects/${projectId}/memory`);
+    if (memory) {
+      el.textContent = memory;
+      el.classList.remove("empty");
+    } else {
+      el.textContent = "No memory yet.";
+      el.classList.add("empty");
+    }
+  } catch (e) {
+    el.textContent = `failed to load memory: ${e.message}`;
+    el.classList.add("empty");
+  }
+}
+
 async function loadLog() {
   const { entries } = await api(`/api/log?project_id=${projectId}&limit=100`);
   const list = document.getElementById("p-log");
@@ -269,6 +291,37 @@ document.getElementById("p-force-heartbeat").addEventListener("click", async (ev
   } finally {
     btn.disabled = false;
     btn.textContent = original;
+  }
+});
+
+document.getElementById("goal-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const statusEl = document.getElementById("goal-status");
+  const goal = document.getElementById("goal-input").value.trim();
+  if (!goal) return;
+  try {
+    await api(`/api/projects/${projectId}/goal`, { method: "POST", body: JSON.stringify({ goal }) });
+    statusEl.textContent = "saved";
+    statusEl.classList.remove("error");
+    await tick();
+  } catch (e) {
+    statusEl.textContent = e.message;
+    statusEl.classList.add("error");
+  }
+});
+
+document.getElementById("heartbeat-prompt-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const statusEl = document.getElementById("heartbeat-prompt-status");
+  const heartbeatPrompt = document.getElementById("heartbeat-prompt-input").value.trim();
+  try {
+    await api(`/api/projects/${projectId}/heartbeat-prompt`, { method: "POST", body: JSON.stringify({ heartbeat_prompt: heartbeatPrompt }) });
+    statusEl.textContent = "saved";
+    statusEl.classList.remove("error");
+    await tick();
+  } catch (e) {
+    statusEl.textContent = e.message;
+    statusEl.classList.add("error");
   }
 });
 
@@ -325,7 +378,7 @@ async function tick() {
   try {
     const p = await loadProject();
     renderCountdown();
-    await Promise.all([loadInstanceStatus(p), loadInstanceLinks(p), loadHumanTasks(), loadNotes(), loadLog()]);
+    await Promise.all([loadInstanceStatus(p), loadInstanceLinks(p), loadHumanTasks(), loadNotes(), loadMemory(), loadLog()]);
   } catch (e) {
     console.error(e);
   }

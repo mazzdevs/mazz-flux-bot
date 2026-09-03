@@ -170,4 +170,20 @@ impl Conductor {
         let user = format!("Project name: {project_name}\nGoal: {goal}");
         self.decide(SYSTEM, &user).await
     }
+
+    /// Best-effort: asks the conductor to write the FIRST message to a new
+    /// coding-agent session, in its own words, directing it toward `goal` —
+    /// never the raw goal text sent verbatim. Callers must fall back to
+    /// `goal.to_string()` on any failure/empty response (see
+    /// `heartbeat::CreateInstanceNode`) — this must never block instance
+    /// creation.
+    pub async fn compose_initial_prompt(&self, project_name: &str, goal: &str) -> Result<String> {
+        const SYSTEM: &str = "You are opening a new coding-agent session on behalf of a developer. \
+            Write the first message to the agent, in your own words, directing it toward the \
+            goal below. Be concrete and actionable — give the agent clear direction on how to \
+            start, not just a restatement of the goal. Respond with ONLY the message text, no \
+            preamble, no quotes around it, no markdown fences.";
+        let user = format!("Project name: {project_name}\nGoal: {goal}");
+        self.decide(SYSTEM, &user).await
+    }
 }

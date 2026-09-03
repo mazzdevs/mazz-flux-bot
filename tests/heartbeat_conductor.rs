@@ -27,7 +27,7 @@ impl AgentUnderTest for ConductorAdapter {
         let tool_call = ToolCall {
             id: "1".to_string(),
             name: decision.action.clone(),
-            arguments: json!({ "message": decision.message, "tasks": decision.tasks }),
+            arguments: json!({ "message": decision.message, "tasks": decision.tasks, "memory": decision.memory }),
         };
         Ok(AgentOutput {
             final_text: note,
@@ -121,6 +121,17 @@ async fn conductor_response_parsing_is_safe() {
             .expect_tools(&["create_human_task"])
             .expect_tool_arg("create_human_task", "message", json!("one blocker"))
             .build(),
+        // The conductor's compacted memory must round-trip through parsing
+        // untouched — this is the field that lets it avoid re-reading full
+        // history every tick, so a silent drop here would be a real bug.
+        test(
+            "wait-with-memory",
+            r#"{"action": "wait", "note": "nothing new", "memory": "PR #123: implementation done, awaiting review. Blocked on prod DB access for validation."}"#,
+        )
+        .name("wait carries an updated memory summary")
+        .expect_tools(&["wait"])
+        .expect_tool_arg("wait", "memory", json!("PR #123: implementation done, awaiting review. Blocked on prod DB access for validation."))
+        .build(),
     ];
 
     let suite = spice_framework::suite("heartbeat conductor response parsing", tests);

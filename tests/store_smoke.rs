@@ -10,7 +10,7 @@ async fn store_round_trips_everything() {
     let store = Store::open(&dir).await.expect("open store");
 
     let project = store
-        .create_project(CreateProjectRequest { name: "t".into(), goal: "g".into(), constellation: None, heartbeat_interval_secs: None })
+        .create_project(CreateProjectRequest { name: "t".into(), goal: "g".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None })
         .await
         .expect("create project");
 
@@ -53,6 +53,55 @@ async fn store_round_trips_everything() {
     store.log_action(Some(&project.id), None, "did_a_thing", None, None, None).await.unwrap();
     let log = store.list_action_log(Some(&project.id), 10).await.unwrap();
     assert!(log.iter().any(|e| e.action == "did_a_thing"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn memory_overwrites_not_appends() {
+    let dir = tempfile_dir();
+    let store = Store::open(&dir).await.expect("open store");
+
+    let project = store
+        .create_project(CreateProjectRequest { name: "t".into(), goal: "g".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None })
+        .await
+        .unwrap();
+
+    assert_eq!(store.read_memory(&project.id).await.unwrap(), None);
+
+    store.write_memory(&project.id, "first summary").await.unwrap();
+    assert_eq!(store.read_memory(&project.id).await.unwrap(), Some("first summary".to_string()));
+
+    // Second write must fully replace, not append.
+    store.write_memory(&project.id, "second summary, much shorter").await.unwrap();
+    let content = store.read_memory(&project.id).await.unwrap().unwrap();
+    assert_eq!(content, "second summary, much shorter");
+    assert!(!content.contains("first summary"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn goal_and_heartbeat_prompt_editable() {
+    let dir = tempfile_dir();
+    let store = Store::open(&dir).await.expect("open store");
+
+    let project = store
+        .create_project(CreateProjectRequest { name: "t".into(), goal: "original goal".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None })
+        .await
+        .unwrap();
+    assert_eq!(project.heartbeat_prompt, None);
+
+    store.set_goal(&project.id, "updated goal").await.unwrap();
+    store.set_heartbeat_prompt(&project.id, "focus on tests this tick").await.unwrap();
+    let updated = store.get_project(&project.id).await.unwrap().unwrap();
+    assert_eq!(updated.goal, "updated goal");
+    assert_eq!(updated.heartbeat_prompt, Some("focus on tests this tick".to_string()));
+
+    // Empty string clears it back to None.
+    store.set_heartbeat_prompt(&project.id, "").await.unwrap();
+    let cleared = store.get_project(&project.id).await.unwrap().unwrap();
+    assert_eq!(cleared.heartbeat_prompt, None);
 
     std::fs::remove_dir_all(&dir).ok();
 }

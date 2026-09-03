@@ -312,6 +312,40 @@ pub async fn set_heartbeat_interval(
 }
 
 #[derive(Deserialize)]
+pub struct SetGoalRequest {
+    pub goal: String,
+}
+
+pub async fn set_goal(State(state): State<AppState>, Path(id): Path<String>, Json(req): Json<SetGoalRequest>) -> ApiResult<Json<serde_json::Value>> {
+    state.store.set_goal(&id, &req.goal).await?;
+    state.store.log_action(Some(&id), None, "goal_updated", None, None, None).await?;
+    let project = state.store.get_project(&id).await?;
+    Ok(Json(json!({ "project": project })))
+}
+
+#[derive(Deserialize)]
+pub struct SetHeartbeatPromptRequest {
+    #[serde(default)]
+    pub heartbeat_prompt: String,
+}
+
+/// Empty string clears it back to `None` ("use judgment") — same convention
+/// as other clearable fields in this API.
+pub async fn set_heartbeat_prompt(State(state): State<AppState>, Path(id): Path<String>, Json(req): Json<SetHeartbeatPromptRequest>) -> ApiResult<Json<serde_json::Value>> {
+    state.store.set_heartbeat_prompt(&id, &req.heartbeat_prompt).await?;
+    state.store.log_action(Some(&id), None, "heartbeat_prompt_updated", None, None, None).await?;
+    let project = state.store.get_project(&id).await?;
+    Ok(Json(json!({ "project": project })))
+}
+
+/// Read-only — memory is conductor-authored (overwritten every tick), not
+/// user-editable like `agent_prompts/`.
+pub async fn get_memory(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    let memory = state.store.read_memory(&id).await?;
+    Ok(Json(json!({ "memory": memory })))
+}
+
+#[derive(Deserialize)]
 pub struct RenameInstanceRequest {
     pub name: String,
 }

@@ -50,7 +50,18 @@ impl ProjectStatus {
 pub struct Project {
     pub id: String,
     pub name: String,
+    /// Overall objective — direction for the conductor to compose the
+    /// initial session prompt in its own words (never sent to pida
+    /// verbatim) and kept in context on every heartbeat tick so a narrow
+    /// per-tick focus (see `heartbeat_prompt`) never loses the big picture.
     pub goal: String,
+    /// Optional direction for what each periodic check-in should focus on.
+    /// The conductor composes the actual `send_message` text in its own
+    /// words using this as guidance, alongside `goal` and `memory` — never
+    /// sent to pida verbatim. `None`/empty means "use judgment from goal +
+    /// status alone" (today's behavior).
+    #[serde(default)]
+    pub heartbeat_prompt: Option<String>,
     pub constellation: String,
     pub status: String,
     pub vape_instance_id: Option<String>,
@@ -79,6 +90,8 @@ fn default_heartbeat_interval_secs() -> u64 {
 pub struct CreateProjectRequest {
     pub name: String,
     pub goal: String,
+    #[serde(default)]
+    pub heartbeat_prompt: Option<String>,
     #[serde(default)]
     pub constellation: Option<String>,
     /// Defaults to `heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS` if omitted.

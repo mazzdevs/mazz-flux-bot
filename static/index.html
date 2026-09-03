@@ -38,8 +38,12 @@
       <label>Constellation</label>
       <input type="text" id="constellation" list="constellations" placeholder="e.g. back-office" required />
       <datalist id="constellations"></datalist>
-      <label>Goal</label>
+      <label>Goal prompt</label>
       <textarea id="goal" placeholder="what should the agent accomplish?" required></textarea>
+      <p class="sub" style="margin-top:0.25rem">Direction for the conductor's own opening message to the agent — not sent verbatim.</p>
+      <label>Heartbeat prompt (optional)</label>
+      <textarea id="heartbeat-prompt" placeholder="what should each check-in focus on?"></textarea>
+      <p class="sub" style="margin-top:0.25rem">Direction for periodic check-ins — the conductor composes the actual message, keeping the goal in mind too.</p>
       <div class="dialog-actions">
         <button type="button" id="create-close" class="btn-secondary">Cancel</button>
         <button type="submit" class="btn">Create</button>
