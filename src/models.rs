@@ -251,6 +251,11 @@ pub struct CreateInstanceRequest {
     pub ticket: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job: Option<JobConfig>,
+    /// Every instance this bot creates gets `{"worker": "true"}` so it's
+    /// identifiable in the vape dashboard/instance list as bot-managed, not
+    /// a person's own interactive session. See `heartbeat::CreateInstanceNode`.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub labels: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

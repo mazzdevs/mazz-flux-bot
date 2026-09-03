@@ -198,3 +198,18 @@ archetype means, not just say "sub_agent" generically.
 - Verified live end-to-end: all 5 defaults seeded on a fresh boot, full CRUD via the API,
   the Files tab correctly listing all 5 `archetypes/*.md` files, and the tab itself
   rendering correctly in the browser (screenshot-confirmed).
+
+## Executed (2026-09-03) — `worker` label on every spawned instance
+
+- `CreateInstanceRequest` gained a `labels: HashMap<String, String>` field (documented
+  as a real field in this repo's own earlier research but never actually wired into the
+  struct until now). `CreateInstanceNode` sets `{"worker": "true"}` on every instance
+  this bot creates, so it's identifiable in the vape dashboard/instance list as
+  bot-managed rather than a person's own interactive session.
+- Verified live: created a throwaway project, forced instance creation, confirmed via
+  `GET /api/v1/instances/{id}` that the real instance carries `vape.io/worker: true`
+  (vape-manager namespaces labels under `vape.io/`, consistent with its other
+  auto-applied labels like `vape.io/owner`/`vape.io/constellation`) \u2014 then cleaned up
+  (paused/deleted the project, stopped/deleted the instance).
+- 20 tests still pass (`models_serde.rs`'s `job_config_model_field_serializes_when_present`
+  test updated to also assert the label round-trips).

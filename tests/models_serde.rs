@@ -11,9 +11,11 @@ fn job_config_model_field_serializes_when_present() {
         subdomain: None,
         ticket: None,
         job: Some(JobConfig { prompt: "do a thing".to_string(), harness: Some("pida".to_string()), model: Some("openai/gpt-5.6-sol".to_string()) }),
+        labels: std::collections::HashMap::from([("worker".to_string(), "true".to_string())]),
     };
     let value = serde_json::to_value(&req).unwrap();
     assert_eq!(value["job"]["model"], "openai/gpt-5.6-sol");
+    assert_eq!(value["labels"]["worker"], "true");
     assert_eq!(value["job"]["harness"], "pida");
     assert_eq!(value["job"]["prompt"], "do a thing");
 }

@@ -387,6 +387,7 @@ impl Node<HeartbeatState> for CreateInstanceNode {
             subdomain: None,
             ticket: None,
             job: Some(JobConfig { prompt, harness: Some("pida".to_string()), model: Some(model) }),
+            labels: std::collections::HashMap::from([("worker".to_string(), "true".to_string())]),
         };
 
         let resp = self.vape.create_instance(&req).await.map_err(node_err("create_instance"))?;
