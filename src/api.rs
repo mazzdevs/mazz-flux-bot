@@ -388,3 +388,57 @@ pub async fn rename_instance(State(state): State<AppState>, Path(id): Path<Strin
         .await?;
     Ok(Json(json!({ "result": resp })))
 }
+
+// ---- Archetypes (reusable agent personas) ---------------------------------
+
+pub async fn list_archetypes(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let archetypes = state.store.list_archetypes().await?;
+    Ok(Json(json!({ "archetypes": archetypes })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateArchetypeRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub preferred_model: Option<String>,
+}
+
+pub async fn create_archetype(State(state): State<AppState>, Json(req): Json<CreateArchetypeRequest>) -> ApiResult<Json<serde_json::Value>> {
+    let archetype = state.store.create_archetype(&req.name, &req.description, req.preferred_model.as_deref()).await?;
+    state.store.log_action(None, None, "archetype_created", Some(&json!({"slug": archetype.slug})), None, None).await?;
+    Ok(Json(json!({ "archetype": archetype })))
+}
+
+pub async fn get_archetype(State(state): State<AppState>, Path(slug): Path<String>) -> ApiResult<Response> {
+    match state.store.get_archetype(&slug).await? {
+        Some(a) => Ok(Json(json!({ "archetype": a })).into_response()),
+        None => Ok((StatusCode::NOT_FOUND, Json(json!({"error": "archetype not found"}))).into_response()),
+    }
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateArchetypeRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub preferred_model: Option<String>,
+}
+
+pub async fn update_archetype(State(state): State<AppState>, Path(slug): Path<String>, Json(req): Json<UpdateArchetypeRequest>) -> ApiResult<Json<serde_json::Value>> {
+    let archetype = state
+        .store
+        .update_archetype(&slug, req.name.as_deref(), req.description.as_deref(), req.preferred_model.as_deref())
+        .await?;
+    state.store.log_action(None, None, "archetype_updated", Some(&json!({"slug": slug})), None, None).await?;
+    Ok(Json(json!({ "archetype": archetype })))
+}
+
+pub async fn delete_archetype(State(state): State<AppState>, Path(slug): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    state.store.delete_archetype(&slug).await?;
+    state.store.log_action(None, None, "archetype_deleted", Some(&json!({"slug": slug})), None, None).await?;
+    Ok(Json(json!({ "ok": true })))
+}

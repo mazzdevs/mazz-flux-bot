@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use tokio::fs;
 use tokio::sync::Mutex;
 
-use crate::models::{ActionLogEntry, CreateProjectRequest, HumanTask, Project, ProjectNote, ProjectStatus};
+use crate::models::{default_archetype_model, ActionLogEntry, Archetype, CreateProjectRequest, HumanTask, Project, ProjectNote, ProjectStatus};
 
 pub struct Store {
     root: PathBuf,
@@ -151,6 +151,9 @@ impl Store {
     }
     fn memory_path(&self, project_id: &str) -> PathBuf {
         self.root.join("memory").join(format!("{project_id}.md"))
+    }
+    fn archetype_path(&self, slug: &str) -> PathBuf {
+        self.root.join("archetypes").join(format!("{slug}.md"))
     }
     fn instance_cache_path(&self) -> PathBuf {
         self.root.join("cache").join("instances.json")
@@ -415,6 +418,108 @@ impl Store {
     pub async fn write_memory(&self, project_id: &str, content: &str) -> Result<()> {
         let _guard = self.lock.lock().await;
         write_atomic(&self.memory_path(project_id), content).await
+    }
+
+    // ---- Archetypes (reusable agent personas) ------------------------------
+
+    pub async fn list_archetypes(&self) -> Result<Vec<Archetype>> {
+        let dir = self.root.join("archetypes");
+        let mut out = Vec::new();
+        let mut entries = match fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(e).with_context(|| format!("reading dir {}", dir.display())),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let raw = fs::read_to_string(&path).await.with_context(|| format!("reading {}", path.display()))?;
+            out.push(parse_archetype(&slug, &raw));
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    pub async fn get_archetype(&self, slug: &str) -> Result<Option<Archetype>> {
+        match fs::read_to_string(self.archetype_path(slug)).await {
+            Ok(raw) => Ok(Some(parse_archetype(slug, &raw))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading archetypes/{slug}.md")),
+        }
+    }
+
+    /// Errors on slug collision rather than silently overwriting an existing
+    /// archetype — use `update_archetype` to edit one.
+    pub async fn create_archetype(&self, name: &str, description: &str, preferred_model: Option<&str>) -> Result<Archetype> {
+        let _guard = self.lock.lock().await;
+        let slug = crate::heartbeat::slugify(name);
+        if slug.is_empty() {
+            anyhow::bail!("archetype name must contain at least one letter or digit");
+        }
+        let path = self.archetype_path(&slug);
+        if fs::metadata(&path).await.is_ok() {
+            anyhow::bail!("an archetype named '{name}' (slug '{slug}') already exists");
+        }
+        let archetype = Archetype {
+            slug: slug.clone(),
+            name: name.to_string(),
+            description: description.to_string(),
+            preferred_model: preferred_model.filter(|m| !m.is_empty()).map(|m| m.to_string()).unwrap_or_else(default_archetype_model),
+        };
+        write_atomic(&path, &serialize_archetype(&archetype)).await?;
+        Ok(archetype)
+    }
+
+    /// `None` for any field leaves it unchanged.
+    pub async fn update_archetype(&self, slug: &str, name: Option<&str>, description: Option<&str>, preferred_model: Option<&str>) -> Result<Archetype> {
+        let _guard = self.lock.lock().await;
+        let path = self.archetype_path(slug);
+        let raw = fs::read_to_string(&path).await.with_context(|| format!("archetype '{slug}' not found"))?;
+        let mut archetype = parse_archetype(slug, &raw);
+        if let Some(n) = name {
+            archetype.name = n.to_string();
+        }
+        if let Some(d) = description {
+            archetype.description = d.to_string();
+        }
+        if let Some(m) = preferred_model {
+            archetype.preferred_model = if m.is_empty() { default_archetype_model() } else { m.to_string() };
+        }
+        write_atomic(&path, &serialize_archetype(&archetype)).await?;
+        Ok(archetype)
+    }
+
+    pub async fn delete_archetype(&self, slug: &str) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let path = self.archetype_path(slug);
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+        }
+    }
+
+    /// Seeds each of the five starter archetypes independently — only if no
+    /// archetype with that exact slug already exists. Checked per-slug, not
+    /// gated on whether `archetypes/` as a whole exists, so it's safe (and
+    /// idempotent) to call on every startup: an edited starter archetype is
+    /// left untouched, a deleted one is recreated, and any user-created
+    /// archetype with a different slug is never affected.
+    pub async fn seed_default_archetypes(&self) -> Result<()> {
+        for (name, description) in DEFAULT_ARCHETYPES {
+            let slug = crate::heartbeat::slugify(name);
+            if self.get_archetype(&slug).await?.is_some() {
+                continue;
+            }
+            // Ignore collision errors — defense in depth against a race
+            // between the check above and this call; the check is the real
+            // guard for the common case.
+            let _ = self.create_archetype(name, description, None).await;
+        }
+        Ok(())
     }
 
     // ---- Settings (flat key/value map) -------------------------------------
@@ -697,3 +802,83 @@ fn split_created_at_comment(raw: &str) -> (String, String) {
     }
     (String::new(), raw.to_string())
 }
+
+/// Pulls a single `<!-- key: value -->` comment line's value out of `raw`,
+/// if present.
+fn extract_comment_field(raw: &str, key: &str) -> Option<String> {
+    let prefix = format!("<!-- {key}: ");
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            if let Some(value) = rest.strip_suffix(" -->") {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Archetype file format: two `<!-- key: value -->` comment lines (name,
+/// preferred_model) followed by a blank line, then the description as plain
+/// body text — same human-editable-through-the-Files-tab spirit as the
+/// `<!-- created_at: ... -->` convention used for project notes.
+fn parse_archetype(slug: &str, raw: &str) -> Archetype {
+    let name = extract_comment_field(raw, "name").unwrap_or_else(|| slug.to_string());
+    let preferred_model = extract_comment_field(raw, "preferred_model").unwrap_or_else(default_archetype_model);
+    // Body is everything after the two comment lines and the blank line that
+    // follows them — find the first blank line and take everything after.
+    let description = raw
+        .split_once("\n\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    Archetype { slug: slug.to_string(), name, description, preferred_model }
+}
+
+fn serialize_archetype(archetype: &Archetype) -> String {
+    format!(
+        "<!-- name: {} -->\n<!-- preferred_model: {} -->\n\n{}\n",
+        archetype.name, archetype.preferred_model, archetype.description.trim()
+    )
+}
+
+/// The five starter archetypes seeded on first boot — (name, description).
+const DEFAULT_ARCHETYPES: &[(&str, &str)] = &[
+    (
+        "Coder",
+        "Implements features and fixes with working, tested code. Reads existing \
+         conventions in the codebase before writing anything new, keeps changes scoped \
+         to exactly what was asked, and verifies its own work actually runs/passes \
+         before calling something done. Prefers small, reviewable changes over large \
+         rewrites.",
+    ),
+    (
+        "Researcher",
+        "Investigates and reports findings without changing code or state. Cites \
+         sources, file paths, or command output for every claim rather than asserting \
+         from memory. Explicitly separates what's confirmed from what's inferred or \
+         guessed. Produces a structured writeup (not just a one-line answer) that a \
+         human or another agent can act on directly.",
+    ),
+    (
+        "Planner",
+        "Breaks a goal into a concrete, ordered, reviewable plan before any execution \
+         starts. Calls out risks, unknowns, and decisions that need a human up front \
+         rather than making assumptions silently. Does not begin implementing without \
+         explicit go-ahead — the deliverable is the plan itself, not code.",
+    ),
+    (
+        "Reviewer",
+        "Critiques existing work — code, PRs, plans — for correctness, completeness, \
+         and adherence to stated requirements. Flags what's wrong, risky, or missing \
+         without necessarily fixing it themselves. Prioritizes findings by severity \
+         (blocking vs nice-to-have) rather than listing everything with equal weight.",
+    ),
+    (
+        "Designer",
+        "Focuses on UX/UI and information architecture rather than backend logic. \
+         Proposes multiple concrete, comparable options with explicit tradeoffs instead \
+         of committing to a single answer unprompted. Considers accessibility and \
+         consistency with existing patterns before introducing novelty.",
+    ),
+];

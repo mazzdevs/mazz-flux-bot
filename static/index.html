@@ -30,6 +30,23 @@
     </div>
   </header>
 
+  <dialog id="archetype-dialog">
+    <form id="archetype-form">
+      <h2><svg class="icon"><use href="/icons.svg#icon-users"></use></svg> <span id="archetype-dialog-title">New archetype</span></h2>
+      <input type="hidden" id="archetype-slug" />
+      <label>Name</label>
+      <input type="text" id="archetype-name" placeholder="e.g. Coder" required />
+      <label>Preferred model</label>
+      <input type="text" id="archetype-model" placeholder="openai/gpt-5.6-sol-pro" />
+      <label>Description</label>
+      <textarea id="archetype-description" placeholder="what this persona does, and how it approaches work" required></textarea>
+      <div class="dialog-actions">
+        <button type="button" id="archetype-close" class="btn-secondary">Cancel</button>
+        <button type="submit" class="btn">Save</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="create-dialog">
     <form id="create-form">
       <h2><svg class="icon"><use href="/icons.svg#icon-plus"></use></svg> New project</h2>
@@ -75,6 +92,9 @@
     <div class="tab-strip" role="tablist">
       <button class="tab-btn active" id="tab-dashboard" data-tab="dashboard" type="button" role="tab" aria-selected="true">
         <svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> Dashboard
+      </button>
+      <button class="tab-btn" id="tab-archetypes" data-tab="archetypes" type="button" role="tab" aria-selected="false">
+        <svg class="icon"><use href="/icons.svg#icon-users"></use></svg> Archetypes
       </button>
       <button class="tab-btn" id="tab-files" data-tab="files" type="button" role="tab" aria-selected="false">
         <svg class="icon"><use href="/icons.svg#icon-folder"></use></svg> Files
@@ -123,6 +143,37 @@
       </section>
     </div>
 
+    <div id="tab-panel-archetypes" class="tab-panel">
+      <section id="archetypes">
+        <div class="section-header">
+          <h2><svg class="icon"><use href="/icons.svg#icon-users"></use></svg> Archetypes</h2>
+          <div class="section-header-actions">
+            <div class="view-toggle">
+              <button id="archetype-view-list" class="btn-icon" type="button" aria-label="List view" title="List view">
+                <svg class="icon"><use href="/icons.svg#icon-list"></use></svg>
+              </button>
+              <button id="archetype-view-tiles" class="btn-icon" type="button" aria-label="Tile view" title="Tile view">
+                <svg class="icon"><use href="/icons.svg#icon-grid"></use></svg>
+              </button>
+            </div>
+            <button id="archetype-create-toggle" class="btn" type="button">
+              <svg class="icon"><use href="/icons.svg#icon-plus"></use></svg> New archetype
+            </button>
+          </div>
+        </div>
+        <p class="sub">Reusable agent personas the conductor can reference when a goal or plan calls for spinning up a sub-agent — e.g. telling pida to "use the Reviewer archetype" for a nitpick pass.</p>
+
+        <table id="archetypes-table">
+          <thead>
+            <tr><th>Name</th><th>Preferred model</th><th>Description</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="archetypes-body"></tbody>
+        </table>
+
+        <div id="archetypes-tiles" class="projects-tiles"></div>
+      </section>
+    </div>
+
     <div id="tab-panel-files" class="tab-panel">
       <section id="files">
         <div class="section-header">
@@ -144,6 +195,7 @@
 
   <script src="/theme.js"></script>
   <script src="/app.js"></script>
+  <script src="/archetypes.js"></script>
   <script src="/files.js"></script>
 </body>
 </html>

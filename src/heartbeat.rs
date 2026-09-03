@@ -192,7 +192,16 @@ const SYSTEM_PROMPT: &str = "You are an autonomous orchestrator managing a singl
     split them into distinct entries in `tasks` rather than one combined `message` — this lets a \
     human resolve each one independently. Use add_note on any tick (including wait) to record \
     findings, context, or progress worth keeping permanently — it does not change what action \
-    is taken. Prefer wait when unsure.";
+    is taken. \
+    You are also given `archetypes` — a catalog of reusable agent personas, each with a name, \
+    description, and preferred model. When `goal`, `heartbeat_prompt`, or `memory` implies \
+    spinning up a sub-agent for a specific kind of work (e.g. \"spin up a sub_agent to validate \
+    the implementation\", \"resolve this nitpick with a sub_agent\"), pick the archetype whose \
+    description best matches that kind of work and, in your `send_message` text, tell the pida \
+    instance explicitly which archetype to use — name it and summarize its description/preferred \
+    model so pida has enough to act on without needing to look it up itself. If no archetype \
+    fits well, proceed without recommending one rather than forcing a bad match. \
+    Prefer wait when unsure.";
 
 #[derive(Debug, Clone)]
 pub(crate) enum TickOutcome {
@@ -347,9 +356,9 @@ async fn try_llm_slug(conductor: &Conductor, project_name: &str, goal: &str) -> 
 /// its own words (see `Conductor::compose_initial_prompt`). Falls back to
 /// sending `goal` verbatim on any failure/empty response — must never block
 /// instance creation. Returns `(prompt, source)` for logging.
-async fn compose_initial_prompt(conductor: &Conductor, project_name: &str, goal: &str) -> (String, &'static str) {
+async fn compose_initial_prompt(conductor: &Conductor, project_name: &str, goal: &str, archetypes_json: Option<&str>) -> (String, &'static str) {
     if conductor.enabled() {
-        if let Ok(text) = conductor.compose_initial_prompt(project_name, goal).await {
+        if let Ok(text) = conductor.compose_initial_prompt(project_name, goal, archetypes_json).await {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 return (trimmed.to_string(), "llm_composed");
@@ -368,7 +377,9 @@ impl Node<HeartbeatState> for CreateInstanceNode {
         };
 
         let model = crate::conductor::resolve_model(&self.store, "instance_model", "MAZZ_FLUX_INSTANCE_MODEL", crate::conductor::DEFAULT_MODEL).await;
-        let (prompt, prompt_source) = compose_initial_prompt(&self.conductor, &state.project_name, &state.goal).await;
+        let archetypes = self.store.list_archetypes().await.unwrap_or_default();
+        let archetypes_json = serde_json::to_string(&archetypes).ok();
+        let (prompt, prompt_source) = compose_initial_prompt(&self.conductor, &state.project_name, &state.goal, archetypes_json.as_deref()).await;
 
         let req = CreateInstanceRequest {
             name,
@@ -469,11 +480,13 @@ impl Node<HeartbeatState> for DecideNode {
         };
 
         let memory = self.store.read_memory(&state.project_id).await.unwrap_or(None);
+        let archetypes = self.store.list_archetypes().await.unwrap_or_default();
 
         let user = serde_json::json!({
             "goal": state.goal,
             "heartbeat_prompt": state.heartbeat_prompt,
             "memory": memory,
+            "archetypes": archetypes,
             "pida_status": state.pida_status,
             "recent_messages": state.recent_messages,
         })

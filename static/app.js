@@ -285,6 +285,7 @@ function applyTab(tab) {
   tabPanels.forEach((panel) => panel.classList.toggle("active", panel.id === `tab-panel-${tab}`));
   localStorage.setItem(TAB_KEY, tab);
   if (tab === "files" && window.filesTab) window.filesTab.onShow();
+  if (tab === "archetypes" && window.archetypesTab) window.archetypesTab.onShow();
 }
 
 tabButtons.forEach((btn) => btn.addEventListener("click", () => applyTab(btn.dataset.tab)));

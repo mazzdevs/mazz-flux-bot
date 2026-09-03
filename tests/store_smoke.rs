@@ -58,6 +58,76 @@ async fn store_round_trips_everything() {
 }
 
 #[tokio::test]
+async fn archetype_crud_and_defaults() {
+    let dir = tempfile_dir();
+    let store = Store::open(&dir).await.expect("open store");
+
+    // Default model applies when omitted.
+    let a = store.create_archetype("Test Archetype", "does test things", None).await.unwrap();
+    assert_eq!(a.slug, "test-archetype");
+    assert_eq!(a.preferred_model, "openai/gpt-5.6-sol-pro");
+    assert_eq!(a.description, "does test things");
+
+    let fetched = store.get_archetype("test-archetype").await.unwrap().unwrap();
+    assert_eq!(fetched.name, "Test Archetype");
+
+    // Custom model round-trips.
+    let b = store.create_archetype("Custom Model", "uses a custom model", Some("anthropic/claude-sonnet-5")).await.unwrap();
+    assert_eq!(b.preferred_model, "anthropic/claude-sonnet-5");
+
+    let all = store.list_archetypes().await.unwrap();
+    assert_eq!(all.len(), 2);
+
+    // Slug collision is rejected, not silently overwritten.
+    assert!(store.create_archetype("Test Archetype", "different description", None).await.is_err());
+
+    // Partial update leaves other fields untouched.
+    let updated = store.update_archetype("test-archetype", None, Some("updated description"), None).await.unwrap();
+    assert_eq!(updated.name, "Test Archetype");
+    assert_eq!(updated.description, "updated description");
+    assert_eq!(updated.preferred_model, "openai/gpt-5.6-sol-pro");
+
+    store.delete_archetype("test-archetype").await.unwrap();
+    assert_eq!(store.get_archetype("test-archetype").await.unwrap(), None);
+    assert_eq!(store.list_archetypes().await.unwrap().len(), 1);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn archetype_seeding_is_idempotent_per_slug() {
+    let dir = tempfile_dir();
+    let store = Store::open(&dir).await.expect("open store");
+
+    store.seed_default_archetypes().await.unwrap();
+    let seeded = store.list_archetypes().await.unwrap();
+    assert_eq!(seeded.len(), 5);
+    let names: Vec<&str> = seeded.iter().map(|a| a.name.as_str()).collect();
+    for expected in ["Coder", "Researcher", "Planner", "Reviewer", "Designer"] {
+        assert!(names.contains(&expected), "missing seeded archetype: {expected}");
+    }
+
+    // Editing a seeded archetype and re-seeding must leave the edit intact
+    // — seeding only fires for a slug when NO archetype with that slug
+    // exists at all, not on every startup unconditionally.
+    store.update_archetype("coder", None, Some("a customized description"), None).await.unwrap();
+    store.seed_default_archetypes().await.unwrap();
+    let coder = store.get_archetype("coder").await.unwrap().unwrap();
+    assert_eq!(coder.description, "a customized description");
+
+    // Deleting one entirely and re-seeding DOES bring it back — its slug no
+    // longer exists, so the seed guard's condition is met again.
+    store.delete_archetype("researcher").await.unwrap();
+    assert_eq!(store.list_archetypes().await.unwrap().len(), 4);
+    store.seed_default_archetypes().await.unwrap();
+    let after = store.list_archetypes().await.unwrap();
+    assert_eq!(after.len(), 5);
+    assert!(store.get_archetype("researcher").await.unwrap().is_some());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn memory_overwrites_not_appends() {
     let dir = tempfile_dir();
     let store = Store::open(&dir).await.expect("open store");

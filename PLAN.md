@@ -1,234 +1,200 @@
-# Plan: goal/heartbeat prompts (LLM-composed) + persistent memory/compaction
+# Plan: Archetypes — a new primitive, third dashboard tab
 
-Two related features landing together — the memory mechanism directly informs how the
-heartbeat prompt gets composed, so they're one pass.
+## What it is
 
-## Part A — Goal prompt + heartbeat prompt, both LLM-composed
+**Agent archetype**: a reusable persona/role definition — name, description, preferred
+model — stored as a single markdown file. Not yet wired into project creation/heartbeat
+behavior in this pass (that's a natural follow-up: "run this project as a Reviewer" or
+similar) — this pass is the primitive itself: storage, API, and a new dashboard tab to
+browse/create/edit them, plus five starter archetypes.
 
-1. **Goal prompt** (existing `goal` field, kept as the backend name; UI relabels it
-   "Goal prompt") — the overall objective. Direction for the conductor to **compose the
-   initial session prompt in its own words** when creating the vape instance — never
-   sent to the instance verbatim.
-2. **Heartbeat prompt** (new, optional field, `heartbeat_prompt`) — direction for what
-   each periodic check-in should focus on. When the conductor chooses `send_message`, it
-   composes that message **in its own words**, using `heartbeat_prompt` as guidance for
-   *what this check-in is about*, while always keeping the overall `goal` in mind (fed
-   into every tick's context regardless of which prompt is set) so a narrow per-tick
-   focus never loses sight of the big picture.
+## Storage format
 
-Both are plain user-authored text, editable on the project detail page and settable at
-creation time. Neither is ever sent to pida verbatim — the conductor always composes the
-actual outgoing text, informed by memory (Part B) + goal + heartbeat_prompt.
+One file per archetype: `archetypes/{slug}.md`, front-matter + body, mirroring the
+existing `<!-- created_at: ... -->` convention already used for project notes (simple,
+human-readable, editable directly through the Files tab too):
 
-### Data model
-- `models::Project` / `CreateProjectRequest`: add `heartbeat_prompt: Option<String>`
-  (`#[serde(default)]`, same pattern as `heartbeat_interval_secs`'s serde default).
-- `Store`: `set_goal(id, &str)`, `set_heartbeat_prompt(id, Option<&str>)`.
+```markdown
+<!-- name: Coder -->
+<!-- preferred_model: openai/gpt-5.6-sol-pro -->
+Implements features and fixes with working, tested code. Reads existing conventions
+before writing new code, keeps changes scoped to what was asked, and verifies its own
+work runs before calling something done.
+```
 
-### Conductor composition
-- `Conductor::compose_initial_prompt(project_name, goal) -> Result<String>` — system
-  prompt: "You are opening a new coding-agent session. Write the first message to the
-  agent, in your own words, directing it toward this goal. Be concrete and actionable."
-  Fallback (conductor disabled, call fails, empty response): send `goal` verbatim —
-  today's behavior, never blocks instance creation.
-- Heartbeat steering stays the existing `DecideNode` → `send_message` path — the change
-  is prompt engineering: feed `heartbeat_prompt` (if set) + `goal` (always) + `memory`
-  (Part B) into the per-tick context, and instruct the system prompt to compose
-  `send_message` text itself rather than restate any field verbatim.
+- `name`: display name (also used to derive the filename slug on create).
+- `preferred_model`: an OpenRouter model id string. **Default `openai/gpt-5.6-sol-pro`**
+  (confirmed live on this environment's OpenRouter account) if omitted.
+- `description`: everything after the front-matter comment lines — free text, no length
+  cap, rendered as-is (same "plain text in a `<pre>`" treatment as notes today, no
+  markdown-to-HTML rendering added).
+- Filename is a slug of `name` (reuse `heartbeat::slugify`, already exists) — human
+  readable in the Files tab, e.g. `archetypes/coder.md`, `archetypes/researcher.md`.
 
-## Part B — Persistent memory / compaction
+## Backend
 
-The conductor's own LLM call is already stateless per tick (fresh system+user each
-time, no conversation history retained in the call itself) — the actual risk is that the
-*only* cross-tick continuity today is `recent_messages` (last 6 raw pida messages,
-bounded but low-signal) and the unbounded `project_notes` list (append-only, never
-summarized). Over many ticks there's no compact, coherent "what's the state of this
-project" the conductor can use without either re-reading raw history or nothing at all.
+- `models.rs`: new `Archetype { slug: String, name: String, description: String,
+  preferred_model: String }`.
+- `store.rs`: new methods, same shape as the existing project-notes/agent-prompts
+  primitives:
+  - `list_archetypes() -> Vec<Archetype>` — reads every `archetypes/*.md`, parses
+    front-matter, sorts by name.
+  - `get_archetype(slug) -> Option<Archetype>`.
+  - `create_archetype(name, description, preferred_model) -> Archetype` — slugifies
+    `name`, writes the file, errors on slug collision (don't silently overwrite).
+  - `update_archetype(slug, name?, description?, preferred_model?) -> Archetype`.
+  - `delete_archetype(slug) -> ()`.
+  - A small front-matter parse/serialize helper (two comment lines + body), private to
+    `store.rs`, following the existing `split_created_at_comment` pattern already there.
+- `api.rs` + `main.rs`: `GET/POST /api/archetypes`, `GET/POST/DELETE
+  /api/archetypes/{slug}`.
+- Seed the five starter archetypes on first boot if `archetypes/` is empty (idempotent —
+  checked at `Store::open` time or lazily on first `list_archetypes` call, whichever
+  reads cleaner) so a fresh install isn't an empty tab: **Coder, Researcher, Planner,
+  Reviewer, Designer** (content drafted below).
 
-Fix: a single **memory file per project**, compacted (overwritten, not appended) each
-tick — the conductor's own working summary of everything worth remembering, written
-fresh every time it gets a response from pida.
+## Frontend — new "Archetypes" tab
 
-- **Storage**: `Store::read_memory(project_id) -> Result<Option<String>>` /
-  `write_memory(project_id, content) -> Result<()>`, file `memory/{project_id}.md`.
-  Unlike `notes/` (append-only, timestamped, historical record) this is a single
-  mutable file — each write *replaces* the previous content. Genuinely a new file
-  category, not a repurposing of `project_notes`.
-- **`Decision` gains `memory: Option<String>`** — the conductor's fully rewritten,
-  self-contained compacted summary for this tick, replacing whatever was there before.
-  Distinct from `add_note` (still a separate, append-only historical log — notes are
-  "worth keeping a permanent record of," memory is "worth remembering right now").
-- **`DecideNode::run`**: reads `memory/{project_id}.md` fresh every tick (same
-  read-fresh-every-tick pattern as `agent_prompts/validation.md`), includes it in the
-  `user` JSON blob as `"memory"` alongside `goal`, `heartbeat_prompt`, `pida_status`,
-  `recent_messages`.
-- **System prompt** gains: "You are given `memory` — your own compacted summary from
-  the previous tick (empty on the first tick). Each response, include a `memory` field
-  with a fully rewritten, self-contained summary of everything worth remembering about
-  this project's progress, decisions, and state — this REPLACES the previous memory
-  entirely, so carry forward anything still relevant rather than assuming it persists on
-  its own. Keep it concise; this is what lets you avoid re-reading full history every
-  tick. When composing `send_message`, use this memory (plus `goal` and
-  `heartbeat_prompt`) to write a coherent, context-aware check-in in your own words."
-- **`persist_tick`**: if `final_state.decision` (or a new `HeartbeatState.memory` update
-  slot, following the same `Update`/reducer pattern as `add_note`) carries a non-empty
-  `memory`, write it via `Store::write_memory` — independent of which `action` was taken,
-  same as `add_note` today.
-- **Not fed into `CreateInstanceNode`** — memory only exists once there's been at least
-  one tick with a live instance; the very first tick's `create_instance` path has no
-  memory yet, which is expected (`Option<String>` = `None` → omit from context / compose
-  the initial prompt from `goal` alone, per Part A).
+Between Dashboard and Files in the tab strip (`index.html`'s `.tab-strip` +
+`.tab-panel`s, same pattern as the existing two tabs). List/tile view toggle mirroring
+the existing Projects section (reuse the same view-toggle localStorage pattern, separate
+key). Each card/row shows name, preferred model, description preview, edit/delete
+actions. A "New archetype" button (styled like the existing prominent blue "New
+project" button) opens a small dialog: Name, Preferred model (text input, placeholder
+`openai/gpt-5.6-sol-pro`), Description (textarea).
 
-## `heartbeat.rs` wiring (combined)
+New `static/archetypes.js` (kept separate, same reasoning as `files.js`) for
+load/create/edit/delete + the tab's `onShow` lazy-load hook (same lazy-load pattern
+`files.js` already uses via `window.filesTab`).
 
-- `HeartbeatState` gains `heartbeat_prompt: Option<String>` and `memory: Option<String>`
-  (the latter populated by `FetchStatusNode` or a new small read step before `decide`,
-  read from `Store::read_memory`).
-- `Update` gains a `MemoryUpdated(String)` variant (or reuse `Decided` and extract
-  `memory` out of it in `persist_tick` — simpler, avoids a new graph edge; decide during
-  implementation based on which reads cleaner against the existing reducer).
-- `CreateInstanceNode::run`: best-effort `conductor.compose_initial_prompt(...)` with
-  verbatim-goal fallback, as in Part A. Logs `instance_prompt_composed` with the source
-  (`llm_composed` vs `verbatim_goal_fallback`), mirroring the existing
-  `instance_name_chosen` logging pattern.
-- `DecideNode::run`: reads memory, builds `user` blob with
-  `{goal, heartbeat_prompt, memory, pida_status, recent_messages}`, uses the updated
-  `SYSTEM_PROMPT`.
-- `persist_tick`: writes `final_state`'s `memory` (if present and non-empty) via
-  `Store::write_memory`, unconditionally of which `TickOutcome` variant fired — same
-  treatment as `add_note`.
+## The five starter archetypes
 
-## API + routes
+1. **Coder** — implements features/fixes with working, tested code; reads existing
+   conventions first; keeps changes scoped; verifies before calling done.
+   `openai/gpt-5.6-sol-pro`.
+2. **Researcher** — investigates and reports findings without changing code; cites
+   sources/file locations for every claim; explicitly separates "confirmed" from
+   "inferred"; produces a structured writeup, not just an answer.
+   `openai/gpt-5.6-sol-pro`.
+3. **Planner** — breaks a goal into a concrete, ordered, reviewable plan before any
+   execution; calls out risks/unknowns/decisions that need a human; doesn't start
+   implementing without explicit go-ahead.
+   `openai/gpt-5.6-sol-pro`.
+4. **Reviewer** — critiques existing work (code, PRs, plans) for correctness,
+   completeness, and adherence to stated requirements; flags what's wrong or risky
+   without necessarily fixing it; prioritizes findings by severity.
+   `openai/gpt-5.6-sol-pro`.
+5. **Designer** — focuses on UX/UI and information architecture; proposes concrete,
+   comparable options (not just one answer) with tradeoffs; considers accessibility and
+   consistency with existing patterns before novelty.
+   `openai/gpt-5.6-sol-pro`.
 
-- `POST /api/projects/{id}/goal` — `{"goal": "..."}`.
-- `POST /api/projects/{id}/heartbeat-prompt` — `{"heartbeat_prompt": "..."}` (empty
-  clears to `None`).
-- `CreateProjectRequest` gets the new optional field so it can be set at creation time.
-- `GET /api/projects/{id}/memory` — read-only surface for the UI to show current memory
-  (no write endpoint needed beyond what the conductor itself writes each tick — this is
-  conductor-authored, not user-authored, unlike `agent_prompts/`).
-
-## Frontend
-
-- **Create-project dialog**: "Goal" textarea relabeled "Goal prompt" + one-line
-  explainer ("direction for the agent's own opening message — not sent verbatim"). New
-  optional "Heartbeat prompt" textarea, same explainer style.
-- **Project detail page**: both prompts become editable inline (textarea + Save,
-  matching the existing heartbeat-interval/instance-rename inline-form pattern) instead
-  of the current read-only `<p class="sub" id="project-goal">`. New read-only "Memory"
-  section (like Notes, but single current value, not a list) showing the conductor's
-  latest compacted summary — visibility into what it's "remembering," not editable by a
-  human (it's the conductor's own scratch space, overwritten every tick regardless).
+(Full description text drafted directly into each seed file during implementation —
+above is the gist, not verbatim.)
 
 ## Execution order
 
-1. `src/models.rs`: `heartbeat_prompt` on `Project`/`CreateProjectRequest`.
-2. `src/store.rs`: `set_goal`, `set_heartbeat_prompt`, `read_memory`, `write_memory`;
-   thread `heartbeat_prompt` through `create_project`.
-3. `src/conductor.rs`: `compose_initial_prompt`; update `SYSTEM_PROMPT`-adjacent doc
-   comments only where relevant (the actual system prompt string lives in heartbeat.rs).
-4. `src/heartbeat.rs`: `HeartbeatState.heartbeat_prompt`/`.memory`; memory read step
-   before `decide`; `Decision.memory` field; updated `SYSTEM_PROMPT`; `CreateInstanceNode`
-   LLM-compose + fallback + logging; `persist_tick` writes memory unconditionally.
-5. `src/api.rs` + `src/main.rs`: goal/heartbeat-prompt update routes, memory read route.
-6. `static/index.html`/`app.js`: create-dialog relabel + new field.
-7. `static/project.html`/`project.js`: editable goal/heartbeat-prompt controls, read-only
-   Memory section.
-8. Build, `cargo test`:
-   - `heartbeat_prompt`/`memory` optional-field serde defaults.
-   - `compose_initial_prompt` fallback-on-disabled-conductor (no network needed).
-   - `parse_conductor_response` handling a `memory` field (round-trips into `Decision`).
-   - `Store::read_memory`/`write_memory` round-trip + overwrite-not-append semantics
-     (write twice, confirm second write fully replaces the first, not appends).
-9. Manual smoke test against the live proc: create a project with both prompts set,
-   confirm the spawned instance's first session message is LLM-composed; force a
-   heartbeat twice in a row and confirm memory persists/updates between ticks and the
-   second tick's `send_message` (if any) reads as informed by the first tick's memory.
-10. Commit + push to `main`.
+1. `src/models.rs`: `Archetype` struct.
+2. `src/store.rs`: front-matter parse/serialize helper + list/get/create/update/delete +
+   first-boot seeding of the five starters.
+3. `src/api.rs` + `src/main.rs`: routes.
+4. `static/index.html`: third tab + panel markup + create-archetype dialog.
+5. `static/archetypes.js`: list/tile rendering, create/edit/delete, lazy-load hook.
+6. `static/style.css`: minor additions if the existing tile/dialog/button classes don't
+   already cover everything (they mostly should — reuse, don't reinvent).
+7. Build, add tests (`store_smoke.rs`-style: create/list/get/update/delete round-trip,
+   front-matter parse edge cases, slug-collision rejection, default-model-when-omitted).
+8. Manual smoke test against the live proc: confirm the five seeds appear on first load
+   (or after clearing `archetypes/` in a scratch data dir), create/edit/delete one via
+   the UI, confirm files land correctly under `archetypes/` and are editable via the
+   existing Files tab too (same directory, no special-casing needed there).
+9. Commit + push to `main`.
 
-## Executed (2026-09-03) — LLM-composed goal/heartbeat prompts + compacted memory
+## Conductor awareness (in scope for this pass)
 
-Landed exactly per the clarified requirements from the Q&A:
+The conductor needs to know archetypes exist so it can reference them when directing
+sub-agent spin-up — e.g. a goal/plan that says "spin up a sub_agent to validate this"
+should let the conductor tell the pida instance *which* archetype to use and what that
+archetype means, not just say "sub_agent" generically.
 
-- **`Project.heartbeat_prompt: Option<String>`** (serde-default `None` for old project
-  files), editable via `POST /api/projects/{id}/heartbeat-prompt` (empty string clears
-  it), settable at creation time via `CreateProjectRequest`. `goal` gained a matching
-  `POST /api/projects/{id}/goal` editor — both now editable inline on the project detail
-  page's new "Prompts" section (textarea + Save, same pattern as the existing
-  interval/rename inline forms), and both are exposed at project-creation time in the
-  dashboard's New Project dialog with explainer text under each field.
-- **Both prompts are LLM-composed, never sent verbatim**:
-  - `Conductor::compose_initial_prompt(project_name, goal)` — one best-effort call asking
-    the conductor to write the actual first message to a new pida session "in its own
-    words, directing it toward this goal, concrete and actionable." `CreateInstanceNode`
-    uses this with a hard fallback to `goal` verbatim on any failure/empty response
-    (disabled conductor, network error, etc) \u2014 verified live: a test project's spawned
-    instance's first session message was a genuinely composed, actionable paragraph, not
-    the raw goal text.
-  - Heartbeat steering (`send_message`) required no new conductor method \u2014 just prompt
-    engineering: `heartbeat_prompt` (if set) + `goal` (always) + `memory` (see below) are
-    fed into `DecideNode`'s `user` JSON blob, and `SYSTEM_PROMPT` now explicitly instructs
-    composing `send_message` text in its own words using that context, never restating
-    any field verbatim. Verified live: a project with both prompts set produced a
-    `pida_send` whose message was clearly informed by (not a copy of) `heartbeat_prompt`
-    and the agent's actual reported status.
-- **Persistent memory / compaction**: new `memory/{project_id}.md` per-project file
-  (`Store::read_memory`/`write_memory`) that the conductor **fully rewrites, never
-  appends to**, every tick via a new `Decision.memory: Option<String>` field.
-  `DecideNode` reads it fresh (same read-fresh-every-tick pattern as
-  `agent_prompts/validation.md`) and includes it in the per-tick context; `persist_tick`
-  writes `final_state.new_memory` unconditionally of which action fired, mirroring
-  `add_note`'s treatment but as a full overwrite instead of an append. `GET
-  /api/projects/{id}/memory` (read-only \u2014 conductor-authored, not user-editable) backs a
-  new read-only "Memory" box on the project detail page's Prompts section. Verified
-  live across two consecutive forced heartbeat ticks against a real instance: memory was
-  written after the first successful tick, and the second tick's memory was a fresh,
-  coherent rewrite that correctly carried forward the still-relevant state (not a
-  restart from scratch, not an append).
-- New/updated tests (17 total across the suite, all passing): `heartbeat_decisions.rs`
-  gained `memory_field_round_trips`/`memory_field_absent_is_none`; `store_smoke.rs`
-  gained `memory_overwrites_not_appends` and `goal_and_heartbeat_prompt_editable`;
-  `models_serde.rs` gained `project_deserializes_without_heartbeat_prompt_field`
-  (old-format JSON compat); `heartbeat_conductor.rs` gained a new `spice_framework` eval
-  case (`wait-with-memory`) exercising the `memory` field through the same
-  tool-call-shaped adapter as the rest of that suite, per the explicit ask to use spice
-  for this kind of behavioral coverage.
-- Smoke-tested live end-to-end on the running proc: created a project with both prompts
-  set, forced three consecutive heartbeats against a real spawned instance (waiting out
-  real pod-boot time with bounded polls, not blind sleeps), confirmed the LLM-composed
-  initial session prompt, the context-aware `send_message`, and two-tick memory
-  continuity, then cleaned up (paused + deleted the project, stopped + deleted both
-  vape instances created during testing \u2014 a benign race between the periodic scan loop
-  and a manually forced tick created two instances for one project; pre-existing
-  behavior, not caused by this change, and not touched in this pass).
+- `DecideNode::run` (heartbeat.rs) reads `Store::list_archetypes()` fresh every tick
+  (same read-fresh pattern as `agent_prompts/validation.md` and `memory`) and includes a
+  compact catalog in the `user` JSON blob: `"archetypes": [{"name", "description",
+  "preferred_model"}, ...]`. Cheap — just the list, not full file contents beyond what's
+  already parsed.
+- `SYSTEM_PROMPT` gains guidance: "You have a catalog of `archetypes` — reusable
+  agent personas (name, description, preferred model). When your goal, heartbeat_prompt,
+  or memory references spinning up a sub-agent for a specific kind of work (e.g.
+  'spin up a sub_agent to validate the implementation', 'resolve this nitpick with a
+  sub_agent'), pick the archetype whose description best matches that kind of work and
+  tell the pida instance, in your `send_message` text, to use that archetype — name it
+  explicitly and summarize its description/preferred model so pida has enough to act on
+  without needing to look it up itself. If no archetype fits, proceed without one."
+- This is deliberately *advisory*, not a hard mechanism: the conductor composes a
+  message that *tells* pida which archetype/persona to adopt for a sub-agent (pida's own
+  actual subagent-spawning tool call is outside this bot's control — mazz-flux-bot only
+  ever talks to pida over chat). No new vape API call, no new action type needed for
+  this pass — it rides entirely on the existing `send_message` path now being
+  archetype-aware.
+- Also feed the archetype catalog into `Conductor::compose_initial_prompt` (used by
+  `CreateInstanceNode` when spawning the project's own instance) — if the goal itself
+  implies a primary role (e.g. a goal that's fundamentally a research task), the initial
+  session prompt can open by establishing that persona too. Same advisory framing.
 
-## Executed (2026-09-03) — optional project name (LLM-suggested) + README
+## Explicitly out of scope for this pass
 
-- **Project name is now optional at creation.** `CreateProjectRequest.name: Option<String>`
-  (`None`/blank in the create-project dialog). `api::create_project` resolves it before
-  calling the store: user-provided name wins if non-empty; otherwise
-  `Conductor::suggest_project_name(goal)` asks the conductor for a short, human-readable
-  name (3-6 words, title case), with a hard fallback to a short id-based placeholder
-  (`project-{8 hex chars}`) if the conductor is disabled or the call fails/returns empty
-  \u2014 mirrors the existing `suggest_instance_slug`/`compose_initial_prompt` best-effort
-  pattern exactly. Logged as `project_created` with a `name_source`
-  (`user_provided`/`llm_suggested`/`placeholder_fallback`). Verified live: a project
-  created with only a `goal` ("Set up a Redis cache layer...") got named "API Gateway
-  Redis Cache" by the conductor.
-- New tests: `create_project_request_name_is_optional` (serde). 18 tests total, all
-  passing.
-- **README.md** written \u2014 full feature tour, architecture, heartbeat-loop walkthrough,
-  quick start, complete env-var config table, API reference table (the same API a
-  `pida` instance running inside this pod can use to manage its own projects, including
-  creation \u2014 confirmed live in this session), dev/test instructions.
-- **Public-repo safety check performed** before pushing: no secrets/keys anywhere in
-  source or git history (grepped for `sk-ant-`/`sk-or-v1-`/`ghp_`/`gho_`/`AKIA` patterns
-  across full history \u2014 only false positives were placeholder text in an old, since-
-  removed HTML form). `vape.stable.dexus.io` (Dutchie-internal vape-manager hostname)
-  appears in source/README as a default/example value \u2014 not a secret, but is
-  Dutchie-specific and meaningless/unreachable to anyone outside that org. No other
-  internal identifiers (Jira ticket numbers, PR content, employee info) found in
-  the bot's own repo \u2014 all of that lived only in the separate, untracked
-  `mazz-flux-bot-state` sibling directory, confirmed outside this repo's git tree
-  entirely (`git check-ignore` confirms it's not even reachable as a path within the
-  repo). `.gitignore` already excludes `.env`/`.envrc`/`.bolt/`.
+- Auto-selecting `preferred_model` to override `instance_model` for a given project
+  based on its dominant archetype — the conductor can *mention* a preferred model in
+  its message today, but actually switching the project's own instance model based on
+  archetype inference is a separate, larger change (would need to happen at
+  create-instance time, before any archetype-relevant context exists yet) and isn't
+  part of this pass.
+
+## Executed (2026-09-03) — Archetypes primitive, third dashboard tab, conductor awareness
+
+- **New primitive: `Archetype`** (`models.rs`) \u2014 name, description, preferred model,
+  stored one-per-file at `archetypes/{slug}.md` with a 2-line comment front-matter
+  (`<!-- name: ... -->`, `<!-- preferred_model: ... -->`) followed by the description as
+  plain body text, mirroring the existing `<!-- created_at: ... -->` convention already
+  used for project notes. Default `preferred_model` is `openai/gpt-5.6-sol-pro` ("Sol
+  Pro" \u2014 confirmed live on this environment's OpenRouter account).
+- `Store` gained full CRUD (`list/get/create/update/delete_archetype`) plus
+  `seed_default_archetypes()`, called unconditionally on every boot but **idempotent
+  per-slug** (not gated on whether `archetypes/` exists as a whole) \u2014 per explicit
+  follow-up request: editing a seeded archetype and restarting leaves the edit intact;
+  fully deleting one and restarting recreates it, since the guard is "does an archetype
+  with this exact slug exist," checked independently for each of the five starters.
+  Verified live against the running proc: edited `reviewer`'s description, deleted
+  `planner` entirely, restarted \u2014 `reviewer` kept the edit, `planner` came back.
+- **Five starter archetypes**: Coder, Researcher, Planner, Reviewer, Designer, each with
+  a real, specific description (not placeholder text) \u2014 seeded automatically on first
+  boot into any fresh `MAZZ_FLUX_DATA_DIR`.
+- **Conductor awareness (the actual point of this primitive)**: the full archetype
+  catalog is read fresh every heartbeat tick and fed into both decision-making paths:
+  - `DecideNode`'s `user` context blob now includes `archetypes` alongside
+    `goal`/`heartbeat_prompt`/`memory`/status \u2014 available for both the `send_message`
+    heartbeat-steering composition AND informing `create_human_task`/`mark_done` calls,
+    per explicit follow-up that archetypes needed to be available for heartbeat-prompt
+    composition too (not just initial-prompt composition).
+  - `Conductor::compose_initial_prompt` gained an optional `archetypes_json` parameter,
+    threaded from `CreateInstanceNode` \u2014 the initial session prompt can establish a
+    primary persona if the goal clearly implies one.
+  - `SYSTEM_PROMPT` updated: when a goal/heartbeat_prompt/memory implies spinning up a
+    sub-agent for specific work, pick the best-matching archetype and name it explicitly
+    in the composed `send_message` text (with a summary of its description/model) so
+    pida has enough to act on. Deliberately advisory, not a new mechanism \u2014 this bot
+    only ever talks to pida over chat, so it can't directly invoke pida's own
+    sub-agent-spawning tool itself; it can only *tell* pida which persona to use.
+- **New "Archetypes" tab** between Dashboard and Files (`index.html`, new
+  `static/archetypes.js`, new `icon-users` SVG symbol) \u2014 list/tile view toggle (own
+  localStorage key, same pattern as Projects'), a "New archetype" dialog
+  (name/preferred-model/description), inline edit (reuses the same dialog, pre-filled)
+  and delete. Archetype `.md` files are also directly browsable/editable through the
+  existing Files tab \u2014 no special-casing needed there, same directory.
+- New tests: `archetype_crud_and_defaults` (create/get/update/delete round-trip,
+  slug-collision rejection, default-model-when-omitted) and
+  `archetype_seeding_is_idempotent_per_slug` (edit-survives-reseed,
+  delete-triggers-recreate). 20 tests total, all passing.
+- Verified live end-to-end: all 5 defaults seeded on a fresh boot, full CRUD via the API,
+  the Files tab correctly listing all 5 `archetypes/*.md` files, and the tab itself
+  rendering correctly in the browser (screenshot-confirmed).

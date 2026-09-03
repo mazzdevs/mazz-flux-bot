@@ -142,6 +142,25 @@ pub struct ProjectNote {
     pub created_at: String,
 }
 
+/// A reusable agent persona/role — name, description, preferred model —
+/// stored as `archetypes/{slug}.md` (see `Store`). The conductor is made
+/// aware of the full catalog every heartbeat tick (see `heartbeat.rs`) so it
+/// can reference the right archetype by name when a goal/plan calls for
+/// spinning up a sub-agent for a specific kind of work.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Archetype {
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub preferred_model: String,
+}
+
+/// Default `preferred_model` for a new archetype when none is specified —
+/// "Sol Pro", confirmed live on OpenRouter.
+pub fn default_archetype_model() -> String {
+    "openai/gpt-5.6-sol-pro".to_string()
+}
+
 // ---- Vape API response shapes -------------------------------------------------
 //
 // Fields we don't strictly need to introspect are left out (unknown fields are

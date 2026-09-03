@@ -447,7 +447,7 @@ a.project-link:hover { color: var(--accent); }
 
 .projects-tiles { display: none; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--sp-4); }
 .projects-tiles.active { display: grid; }
-#projects-table.hidden { display: none; }
+#projects-table.hidden, #archetypes-table.hidden { display: none; }
 
 .project-tile {
   background: var(--bg-elevated);

@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let store = Arc::new(Store::open(&dir).await?);
     tracing::info!(data_dir = %dir.display(), "file store ready");
     state_repo::ensure_init(&dir).await.unwrap_or_else(|e| tracing::warn!(error = %e, "state repo init failed — commits will fail until this is fixed"));
+    store.seed_default_archetypes().await.unwrap_or_else(|e| tracing::warn!(error = %e, "failed to seed default archetypes"));
 
     let vape = Arc::new(VapeClient::new());
     log_conductor_status();
@@ -93,7 +94,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/projects/{id}/goal", post(api::set_goal))
         .route("/api/projects/{id}/heartbeat-prompt", post(api::set_heartbeat_prompt))
         .route("/api/projects/{id}/memory", get(api::get_memory))
-        .route("/api/projects/{id}/instance/rename", post(api::rename_instance));
+        .route("/api/projects/{id}/instance/rename", post(api::rename_instance))
+        .route("/api/archetypes", get(api::list_archetypes).post(api::create_archetype))
+        .route("/api/archetypes/{slug}", get(api::get_archetype).post(api::update_archetype).delete(api::delete_archetype));
 
     let app = Router::new()
         .merge(api_routes)
