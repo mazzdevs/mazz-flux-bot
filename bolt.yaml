@@ -1,0 +1,15 @@
+tools:
+  - rust: "1.89.0"
+cmds:
+  build:
+    desc: Build the project
+    steps:
+      - cargo build
+  run:
+    desc: Run the bot
+    steps:
+      - cargo run
+  test:
+    desc: Run tests
+    steps:
+      - cargo test

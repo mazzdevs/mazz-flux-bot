@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::routing::{get, post};
@@ -6,11 +7,12 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use mazz_flux_bot::conductor::Conductor;
+use mazz_flux_bot::store::Store;
 use mazz_flux_bot::vape_client::VapeClient;
-use mazz_flux_bot::{api, db, heartbeat, AppState};
+use mazz_flux_bot::{api, heartbeat, state_repo, AppState};
 
-async fn log_conductor_status(db: &sqlx::SqlitePool) {
-    let conductor = Conductor::from_sources(db).await;
+async fn log_conductor_status(store: &Store) {
+    let conductor = Conductor::from_sources(store).await;
     if conductor.enabled() {
         tracing::info!(backend = conductor.label(), "conductor configured");
     } else {
@@ -18,19 +20,45 @@ async fn log_conductor_status(db: &sqlx::SqlitePool) {
     }
 }
 
+/// Default data dir is a sibling of this repo's checkout (`../mazz-flux-bot-state`),
+/// not a subdirectory of it — keeps it out of this git repo entirely (no nested
+/// `.git`, nothing to gitignore) so it can be its own separate, persistent
+/// state repo. Override with `MAZZ_FLUX_DATA_DIR` (e.g. an absolute path on a
+/// persistent volume).
+fn data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("MAZZ_FLUX_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let repo_name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("mazz-flux-bot");
+    cwd.parent().map(|p| p.join(format!("{repo_name}-state"))).unwrap_or_else(|| PathBuf::from("../mazz-flux-bot-state"))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let db_path = std::env::var("MAZZ_FLUX_DB_PATH").unwrap_or_else(|_| "mazz-flux-bot.db".to_string());
-    let db = db::init_db(&db_path).await?;
-    tracing::info!(db_path, "sqlite ready");
+    let dir = data_dir();
+
+    // CLI escape hatch: `cargo run -- commit-state` snapshots the state repo
+    // and exits, without booting the HTTP server or heartbeat loop. Useful
+    // from cron/manual use on a flux instance.
+    if std::env::args().nth(1).as_deref() == Some("commit-state") {
+        let message = std::env::args().nth(2).unwrap_or_else(|| format!("manual snapshot {}", chrono::Utc::now().to_rfc3339()));
+        let summary = state_repo::commit(&dir, &message).await?;
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    let store = Arc::new(Store::open(&dir).await?);
+    tracing::info!(data_dir = %dir.display(), "file store ready");
+    state_repo::ensure_init(&dir).await.unwrap_or_else(|e| tracing::warn!(error = %e, "state repo init failed — commits will fail until this is fixed"));
 
     let vape = Arc::new(VapeClient::new());
-    log_conductor_status(&db).await;
+    log_conductor_status(&store).await;
 
-    let state = AppState { db, vape };
+    let state = AppState { store, vape };
 
     tokio::spawn(heartbeat::run(state.clone()));
 
@@ -49,7 +77,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/instances/{id}/status", get(api::get_instance_status))
         .route("/api/instances/{id}/session", get(api::get_instance_session))
         .route("/api/constellations", get(api::list_constellations))
-        .route("/api/settings", get(api::get_settings).post(api::update_settings));
+        .route("/api/settings", get(api::get_settings).post(api::update_settings))
+        .route("/api/state/commit", post(api::commit_state));
 
     let app = Router::new()
         .merge(api_routes)
@@ -58,8 +87,11 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(4270);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    tracing::info!(port, "mazz-flux-bot listening on http://127.0.0.1:{port}");
+    // 0.0.0.0 (not 127.0.0.1) so the port is reachable from outside the pod
+    // when this runs inside a vape/flux instance — vape's port-detection
+    // exposes it as a Link on the dashboard. Still fine on a laptop.
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+    tracing::info!(port, "mazz-flux-bot listening on http://0.0.0.0:{port}");
     axum::serve(listener, app).await?;
 
     Ok(())

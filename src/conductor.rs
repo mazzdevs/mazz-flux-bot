@@ -22,10 +22,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
-use sqlx::SqlitePool;
-
 use crate::anthropic_client::AnthropicClient;
-use crate::db;
+use crate::store::Store;
 
 const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.6-sol";
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -118,9 +116,9 @@ pub enum Conductor {
 
 /// A setting value, checking the DB row first and falling back to the env
 /// var of the same purpose. `None` if neither is set (or the DB row is an
-/// empty string, which `db::set_setting` treats as "cleared").
-async fn resolve(pool: &SqlitePool, db_key: &str, env_key: &str) -> Option<String> {
-    if let Ok(Some(v)) = db::get_setting(pool, db_key).await {
+/// empty string, which `Store::set_setting` treats as "cleared").
+async fn resolve(store: &Store, db_key: &str, env_key: &str) -> Option<String> {
+    if let Ok(Some(v)) = store.get_setting(db_key).await {
         if !v.is_empty() {
             return Some(v);
         }
@@ -146,13 +144,13 @@ impl Conductor {
 
     /// Resolves DB settings first, env vars as fallback — see module docs
     /// for the exact precedence. Called fresh every heartbeat tick.
-    pub async fn from_sources(pool: &SqlitePool) -> Self {
-        if let Some(key) = resolve(pool, "anthropic_api_key", "ANTHROPIC_API_KEY").await {
-            let model = resolve(pool, "anthropic_model", "ANTHROPIC_MODEL").await;
+    pub async fn from_sources(store: &Store) -> Self {
+        if let Some(key) = resolve(store, "anthropic_api_key", "ANTHROPIC_API_KEY").await {
+            let model = resolve(store, "anthropic_model", "ANTHROPIC_MODEL").await;
             return Conductor::Anthropic(AnthropicClient::with_key(key, model));
         }
-        if let Some(key) = resolve(pool, "openrouter_api_key", "OPENROUTER_API_KEY").await {
-            let model = resolve(pool, "openrouter_model", "OPENROUTER_MODEL").await;
+        if let Some(key) = resolve(store, "openrouter_api_key", "OPENROUTER_API_KEY").await {
+            let model = resolve(store, "openrouter_model", "OPENROUTER_MODEL").await;
             return Conductor::OpenRouter(OpenRouterClient::with_key(key, model));
         }
         Conductor::Disabled
@@ -200,18 +198,18 @@ fn preview(key: &str) -> String {
     }
 }
 
-pub async fn settings_status(pool: &SqlitePool) -> SettingsStatus {
-    let anthropic_key = resolve(pool, "anthropic_api_key", "ANTHROPIC_API_KEY").await;
-    let openrouter_key = resolve(pool, "openrouter_api_key", "OPENROUTER_API_KEY").await;
+pub async fn settings_status(store: &Store) -> SettingsStatus {
+    let anthropic_key = resolve(store, "anthropic_api_key", "ANTHROPIC_API_KEY").await;
+    let openrouter_key = resolve(store, "openrouter_api_key", "OPENROUTER_API_KEY").await;
     let active_backend = if anthropic_key.is_some() { "anthropic" } else if openrouter_key.is_some() { "openrouter" } else { "none" };
 
     SettingsStatus {
         active_backend,
         anthropic_key_set: anthropic_key.is_some(),
         anthropic_key_preview: anthropic_key.as_deref().map(preview),
-        anthropic_model: resolve(pool, "anthropic_model", "ANTHROPIC_MODEL").await.unwrap_or_else(|| crate::anthropic_client::DEFAULT_MODEL.to_string()),
+        anthropic_model: resolve(store, "anthropic_model", "ANTHROPIC_MODEL").await.unwrap_or_else(|| crate::anthropic_client::DEFAULT_MODEL.to_string()),
         openrouter_key_set: openrouter_key.is_some(),
         openrouter_key_preview: openrouter_key.as_deref().map(preview),
-        openrouter_model: resolve(pool, "openrouter_model", "OPENROUTER_MODEL").await.unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string()),
+        openrouter_model: resolve(store, "openrouter_model", "OPENROUTER_MODEL").await.unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string()),
     }
 }

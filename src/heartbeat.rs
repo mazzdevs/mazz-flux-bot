@@ -28,7 +28,6 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use crate::conductor::Conductor;
-use crate::db;
 use crate::models::{CreateInstanceRequest, JobConfig, PidaStatus, Project, ProjectStatus};
 use crate::vape_client::VapeClient;
 use crate::AppState;
@@ -371,7 +370,7 @@ pub async fn run(state: AppState) {
 
         // Resolved fresh every tick (not cached) so a key saved through the
         // settings UI mid-run takes effect on the very next tick.
-        let conductor = Arc::new(Conductor::from_sources(&state.db).await);
+        let conductor = Arc::new(Conductor::from_sources(&state.store).await);
         let graph = build_graph(state.vape.clone(), conductor);
         let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
 
@@ -382,11 +381,11 @@ pub async fn run(state: AppState) {
 }
 
 async fn tick(state: &AppState, executor: &Executor<HeartbeatState>) -> anyhow::Result<()> {
-    let projects = db::list_running_projects(&state.db).await?;
+    let projects = state.store.list_running_projects().await?;
     for project in projects {
         if let Err(e) = process_project(state, executor, &project).await {
             error!(project_id = %project.id, error = %e, "failed to process project this tick");
-            let _ = db::log_action(&state.db, Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_error", None, None, Some(&e.to_string())).await;
+            let _ = state.store.log_action(Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_error", None, None, Some(&e.to_string())).await;
         }
     }
     Ok(())
@@ -412,8 +411,8 @@ async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, 
         RunOutcome::Interrupted { state: final_state, reason, .. } => persist_tick(state, project, &final_state, Some(reason)).await,
         RunOutcome::Failed { state: final_state, node, error } => {
             warn!(project_id = %project.id, %node, %error, "heartbeat graph node failed");
-            db::log_action(&state.db, Some(&project.id), final_state.vape_instance_id.as_deref(), "heartbeat_node_failed", None, None, Some(&format!("{node}: {error}"))).await?;
-            db::touch_heartbeat(&state.db, &project.id, Some(&format!("node '{node}' failed: {error}"))).await?;
+            state.store.log_action(Some(&project.id), final_state.vape_instance_id.as_deref(), "heartbeat_node_failed", None, None, Some(&format!("{node}: {error}"))).await?;
+            state.store.touch_heartbeat(&project.id, Some(&format!("node '{node}' failed: {error}"))).await?;
             Ok(())
         }
     }
@@ -424,27 +423,27 @@ async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, 
 async fn persist_tick(state: &AppState, project: &Project, final_state: &HeartbeatState, interrupt_reason: Option<String>) -> anyhow::Result<()> {
     if project.vape_instance_id.is_none() {
         if let Some(id) = &final_state.vape_instance_id {
-            db::set_project_instance(&state.db, &project.id, id).await?;
-            db::log_action(&state.db, Some(&project.id), Some(id), "create_instance", None, Some(id), None).await?;
-            db::touch_heartbeat(&state.db, &project.id, Some("instance created")).await?;
+            state.store.set_project_instance(&project.id, id).await?;
+            state.store.log_action(Some(&project.id), Some(id), "create_instance", None, Some(id), None).await?;
+            state.store.touch_heartbeat(&project.id, Some("instance created")).await?;
         } else {
             let note = final_state.note.clone().unwrap_or_else(|| "create_instance did not return an id".to_string());
-            db::log_action(&state.db, Some(&project.id), None, "create_instance_dry_run", None, Some(&note), None).await?;
-            db::touch_heartbeat(&state.db, &project.id, Some(&note)).await?;
+            state.store.log_action(Some(&project.id), None, "create_instance_dry_run", None, Some(&note), None).await?;
+            state.store.touch_heartbeat(&project.id, Some(&note)).await?;
         }
         return Ok(());
     }
 
     if let Some(reason) = interrupt_reason {
-        db::log_action(&state.db, Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_interrupted", None, Some(&reason), None).await?;
-        db::touch_heartbeat(&state.db, &project.id, Some(&reason)).await?;
+        state.store.log_action(Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_interrupted", None, Some(&reason), None).await?;
+        state.store.touch_heartbeat(&project.id, Some(&reason)).await?;
         return Ok(());
     }
 
     if let Some(h) = &final_state.harness {
         if h != "pida" {
             warn!(project_id = %project.id, harness = %h, "instance is not running the pida harness — mazz-flux-bot only drives pida instances for now");
-            db::touch_heartbeat(&state.db, &project.id, Some(&format!("skipped: instance harness is '{h}', not 'pida'"))).await?;
+            state.store.touch_heartbeat(&project.id, Some(&format!("skipped: instance harness is '{h}', not 'pida'"))).await?;
             return Ok(());
         }
     }
@@ -454,34 +453,34 @@ async fn persist_tick(state: &AppState, project: &Project, final_state: &Heartbe
     // Persisted regardless of which action was taken — see Decision::add_note.
     if let Some(note_md) = &final_state.add_note {
         if !note_md.is_empty() {
-            db::add_project_note(&state.db, &project.id, note_md).await?;
-            db::log_action(&state.db, Some(&project.id), instance_id, "add_note", None, Some(&format!("{} chars", note_md.len())), None).await?;
+            state.store.add_project_note(&project.id, note_md).await?;
+            state.store.log_action(Some(&project.id), instance_id, "add_note", None, Some(&format!("{} chars", note_md.len())), None).await?;
         }
     }
 
     match &final_state.outcome {
         Some(TickOutcome::Sent(msg)) => {
-            db::log_action(&state.db, Some(&project.id), instance_id, "pida_send", Some(&serde_json::json!({"message": msg})), final_state.note.as_deref(), None).await?;
-            db::touch_heartbeat(&state.db, &project.id, Some(&format!("sent: {msg}"))).await?;
+            state.store.log_action(Some(&project.id), instance_id, "pida_send", Some(&serde_json::json!({"message": msg})), final_state.note.as_deref(), None).await?;
+            state.store.touch_heartbeat(&project.id, Some(&format!("sent: {msg}"))).await?;
         }
         Some(TickOutcome::Done) => {
-            db::set_project_status(&state.db, &project.id, ProjectStatus::Done, final_state.note.as_deref()).await?;
-            db::set_heartbeat_enabled(&state.db, &project.id, false).await?;
-            db::log_action(&state.db, Some(&project.id), instance_id, "mark_done", None, final_state.note.as_deref(), None).await?;
+            state.store.set_project_status(&project.id, ProjectStatus::Done, final_state.note.as_deref()).await?;
+            state.store.set_heartbeat_enabled(&project.id, false).await?;
+            state.store.log_action(Some(&project.id), instance_id, "mark_done", None, final_state.note.as_deref(), None).await?;
         }
         Some(TickOutcome::Error) => {
-            db::set_project_status(&state.db, &project.id, ProjectStatus::Error, final_state.note.as_deref()).await?;
-            db::set_heartbeat_enabled(&state.db, &project.id, false).await?;
-            db::log_action(&state.db, Some(&project.id), instance_id, "mark_error", None, final_state.note.as_deref(), None).await?;
+            state.store.set_project_status(&project.id, ProjectStatus::Error, final_state.note.as_deref()).await?;
+            state.store.set_heartbeat_enabled(&project.id, false).await?;
+            state.store.log_action(Some(&project.id), instance_id, "mark_error", None, final_state.note.as_deref(), None).await?;
         }
         Some(TickOutcome::Blocked(description)) => {
-            let task = db::create_human_task(&state.db, &project.id, description).await?;
-            db::set_project_status(&state.db, &project.id, ProjectStatus::Blocked, final_state.note.as_deref()).await?;
-            db::set_heartbeat_enabled(&state.db, &project.id, false).await?;
-            db::log_action(&state.db, Some(&project.id), instance_id, "create_human_task", Some(&serde_json::json!({"task_id": task.id, "description": description})), final_state.note.as_deref(), None).await?;
+            let task = state.store.create_human_task(&project.id, description).await?;
+            state.store.set_project_status(&project.id, ProjectStatus::Blocked, final_state.note.as_deref()).await?;
+            state.store.set_heartbeat_enabled(&project.id, false).await?;
+            state.store.log_action(Some(&project.id), instance_id, "create_human_task", Some(&serde_json::json!({"task_id": task.id, "description": description})), final_state.note.as_deref(), None).await?;
         }
         _ => {
-            db::touch_heartbeat(&state.db, &project.id, final_state.note.as_deref()).await?;
+            state.store.touch_heartbeat(&project.id, final_state.note.as_deref()).await?;
         }
     }
     Ok(())

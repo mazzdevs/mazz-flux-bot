@@ -73,7 +73,7 @@ pub struct CreateProjectRequest {
 /// dry-run mode, would have made) plus the conductor's reasoning ticks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionLogEntry {
-    pub id: i64,
+    pub id: String,
     pub project_id: Option<String>,
     pub instance_id: Option<String>,
     pub action: String,
@@ -88,7 +88,7 @@ pub struct ActionLogEntry {
 /// heartbeat until resolved (see `heartbeat.rs`'s `TickOutcome::Blocked`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HumanTask {
-    pub id: i64,
+    pub id: String,
     pub project_id: String,
     pub description: String,
     pub status: String,
@@ -102,7 +102,7 @@ pub struct HumanTask {
 /// for now (see PLAN.md).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectNote {
-    pub id: i64,
+    pub id: String,
     pub project_id: String,
     pub content: String,
     pub created_at: String,

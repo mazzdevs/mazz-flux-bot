@@ -20,7 +20,14 @@ pub struct VapeClient {
 
 impl VapeClient {
     pub fn new() -> Self {
-        let base_url = std::env::var("CADMIUM_VAPE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        // Base URL precedence: explicit test override, then the in-cluster
+        // vape-manager service (present as VAPE_MANAGER_URL when running
+        // *inside* a vape/flux instance — reaches vape-manager directly over
+        // the cluster network, no Cloudflare WARP needed), then the public
+        // WARP-gated URL for when this runs off-cluster (e.g. a laptop).
+        let base_url = std::env::var("CADMIUM_VAPE_URL")
+            .or_else(|_| std::env::var("VAPE_MANAGER_URL"))
+            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let live = std::env::var("MAZZ_FLUX_LIVE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
         if !live {
             warn!("MAZZ_FLUX_LIVE not set — mutating vape calls (create/start/stop/delete/send) will be logged but NOT fired");
