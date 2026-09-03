@@ -144,6 +144,9 @@ impl Store {
     fn settings_path(&self) -> PathBuf {
         self.root.join("settings.json")
     }
+    fn agent_prompt_path(&self, name: &str) -> PathBuf {
+        self.root.join("agent_prompts").join(format!("{name}.md"))
+    }
     fn instance_cache_path(&self) -> PathBuf {
         self.root.join("cache").join("instances.json")
     }
@@ -355,6 +358,22 @@ impl Store {
             let fetched_at = v.get("fetched_at")?.as_str()?.to_string();
             Some((raw, fetched_at))
         }))
+    }
+
+    // ---- Agent prompts (user-authored, read-only from the bot's side) -----
+
+    /// Reads `agent_prompts/{name}.md` if it exists — e.g. `"validation"` for
+    /// the extra criteria injected into the conductor's system prompt before
+    /// it's allowed to mark a project done (see `heartbeat::DecideNode`).
+    /// `Ok(None)` (not an error) if the file doesn't exist — this is an
+    /// opt-in customization point, most projects won't have one. Edited
+    /// directly through the Files tab; no dedicated write endpoint.
+    pub async fn read_agent_prompt(&self, name: &str) -> Result<Option<String>> {
+        match fs::read_to_string(self.agent_prompt_path(name)).await {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading agent_prompts/{name}.md")),
+        }
     }
 
     // ---- Settings (flat key/value map) -------------------------------------

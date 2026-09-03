@@ -27,7 +27,7 @@ impl AgentUnderTest for ConductorAdapter {
         let tool_call = ToolCall {
             id: "1".to_string(),
             name: decision.action.clone(),
-            arguments: json!({ "message": decision.message }),
+            arguments: json!({ "message": decision.message, "tasks": decision.tasks }),
         };
         Ok(AgentOutput {
             final_text: note,
@@ -45,7 +45,7 @@ impl AgentUnderTest for ConductorAdapter {
     }
 
     fn available_tools(&self, _config: &AgentConfig) -> Vec<String> {
-        vec!["wait".to_string(), "send_message".to_string(), "mark_done".to_string(), "mark_error".to_string()]
+        vec!["wait".to_string(), "send_message".to_string(), "mark_done".to_string(), "mark_error".to_string(), "create_human_task".to_string()]
     }
 
     fn name(&self) -> &str {
@@ -102,6 +102,24 @@ async fn conductor_response_parsing_is_safe() {
         test("empty-string", "")
             .name("empty response")
             .expect_tools(&["wait"])
+            .build(),
+        // A pida reply enumerating several distinct blockers should split
+        // into separate, independently-resolvable HumanTask entries via
+        // `tasks`, not one monolithic `message` string.
+        test(
+            "multi-task-human-task",
+            r#"{"action": "create_human_task", "tasks": ["grant prod DB access", "approve rollout batch size", "assign an owner for the test plan"], "note": "three separate asks from the agent"}"#,
+        )
+        .name("create_human_task with multiple discrete blockers")
+        .expect_tools(&["create_human_task"])
+        .expect_tool_arg("create_human_task", "tasks", json!(["grant prod DB access", "approve rollout batch size", "assign an owner for the test plan"]))
+        .expect_text_contains("three separate asks")
+        .build(),
+        // The legacy single-message shape must still work unchanged.
+        test("single-task-human-task", r#"{"action": "create_human_task", "message": "one blocker", "note": "single ask"}"#)
+            .name("create_human_task with one blocker (legacy message shape)")
+            .expect_tools(&["create_human_task"])
+            .expect_tool_arg("create_human_task", "message", json!("one blocker"))
             .build(),
     ];
 

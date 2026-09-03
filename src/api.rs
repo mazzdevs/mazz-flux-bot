@@ -2,7 +2,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::conductor;
@@ -142,46 +142,39 @@ pub async fn list_constellations(State(state): State<AppState>) -> ApiResult<Jso
     Ok(Json(json!({ "constellations": constellations })))
 }
 
-// ---- Conductor settings -------------------------------------------------------
-//
-// Never echoes a raw secret back to the browser — only whether one is set
-// and a masked last-4 preview. See conductor.rs::settings_status.
+// ---- Settings (model selection only — no API keys) -----------------------
 
-pub async fn get_settings(State(state): State<AppState>) -> ApiResult<Json<conductor::SettingsStatus>> {
-    Ok(Json(conductor::settings_status(&state.store).await))
+#[derive(Serialize)]
+pub struct SettingsResponse {
+    pub conductor_model: String,
+    pub instance_model: String,
+}
+
+pub async fn get_settings(State(state): State<AppState>) -> ApiResult<Json<SettingsResponse>> {
+    let conductor_model = conductor::resolve_model(&state.store, "conductor_model", "OPENROUTER_MODEL", conductor::DEFAULT_MODEL).await;
+    let instance_model = conductor::resolve_model(&state.store, "instance_model", "MAZZ_FLUX_INSTANCE_MODEL", conductor::DEFAULT_MODEL).await;
+    Ok(Json(SettingsResponse { conductor_model, instance_model }))
 }
 
 #[derive(Deserialize, Default)]
 pub struct UpdateSettingsRequest {
-    /// Omitted (not present in the JSON body) means "leave unchanged" —
-    /// that's how the settings form avoids clobbering an already-saved key
-    /// just because its input was left blank in the UI. An explicit empty
-    /// string clears the key (see `Store::set_setting`).
     #[serde(default)]
-    pub anthropic_api_key: Option<String>,
+    pub conductor_model: Option<String>,
     #[serde(default)]
-    pub anthropic_model: Option<String>,
-    #[serde(default)]
-    pub openrouter_api_key: Option<String>,
-    #[serde(default)]
-    pub openrouter_model: Option<String>,
+    pub instance_model: Option<String>,
 }
 
-pub async fn update_settings(State(state): State<AppState>, Json(req): Json<UpdateSettingsRequest>) -> ApiResult<Json<conductor::SettingsStatus>> {
-    if let Some(v) = &req.anthropic_api_key {
-        state.store.set_setting("anthropic_api_key", v).await?;
+pub async fn update_settings(State(state): State<AppState>, Json(req): Json<UpdateSettingsRequest>) -> ApiResult<Json<SettingsResponse>> {
+    if let Some(v) = &req.conductor_model {
+        state.store.set_setting("conductor_model", v).await?;
     }
-    if let Some(v) = &req.anthropic_model {
-        state.store.set_setting("anthropic_model", v).await?;
-    }
-    if let Some(v) = &req.openrouter_api_key {
-        state.store.set_setting("openrouter_api_key", v).await?;
-    }
-    if let Some(v) = &req.openrouter_model {
-        state.store.set_setting("openrouter_model", v).await?;
+    if let Some(v) = &req.instance_model {
+        state.store.set_setting("instance_model", v).await?;
     }
     state.store.log_action(None, None, "settings_updated", None, None, None).await?;
-    Ok(Json(conductor::settings_status(&state.store).await))
+    let conductor_model = conductor::resolve_model(&state.store, "conductor_model", "OPENROUTER_MODEL", conductor::DEFAULT_MODEL).await;
+    let instance_model = conductor::resolve_model(&state.store, "instance_model", "MAZZ_FLUX_INSTANCE_MODEL", conductor::DEFAULT_MODEL).await;
+    Ok(Json(SettingsResponse { conductor_model, instance_model }))
 }
 
 // ---- Human tasks (conductor-raised blockers) -----------------------------
@@ -316,4 +309,22 @@ pub async fn set_heartbeat_interval(
         .await?;
     let project = state.store.get_project(&id).await?;
     Ok(Json(json!({ "project": project })))
+}
+
+#[derive(Deserialize)]
+pub struct RenameInstanceRequest {
+    pub name: String,
+}
+
+/// Renames this project's vape instance (not the project itself). 404s
+/// cleanly if the project has no instance yet.
+pub async fn rename_instance(State(state): State<AppState>, Path(id): Path<String>, Json(req): Json<RenameInstanceRequest>) -> ApiResult<Json<serde_json::Value>> {
+    let project = state.store.get_project(&id).await?.ok_or_else(|| anyhow::anyhow!("project not found"))?;
+    let instance_id = project.vape_instance_id.ok_or_else(|| anyhow::anyhow!("project has no instance yet"))?;
+    let resp = state.vape.rename_instance(&instance_id, &req.name).await?;
+    state
+        .store
+        .log_action(Some(&id), Some(&instance_id), "instance_renamed", Some(&json!({"name": req.name})), Some(&resp.to_string()), None)
+        .await?;
+    Ok(Json(json!({ "result": resp })))
 }

@@ -91,10 +91,21 @@ fn is_due(project: &Project) -> bool {
 pub struct Decision {
     #[serde(default)]
     pub action: String,
-    /// For `send_message`: the steering text. For `create_human_task`: the
-    /// description of what a human needs to do.
+    /// For `send_message`: the steering text. For `create_human_task` when
+    /// there's exactly one blocker: the description of what a human needs
+    /// to do. If the conductor has multiple distinct blockers, it should use
+    /// `tasks` instead (see below) rather than cramming them into one
+    /// monolithic message.
     #[serde(default)]
     pub message: Option<String>,
+    /// For `create_human_task` with more than one discrete blocker — e.g. a
+    /// pida instance's reply lists three separate numbered asks. Each
+    /// element becomes its own `HumanTask` row, so a person can resolve them
+    /// independently instead of one giant paragraph. If both `tasks` and
+    /// `message` are present, `tasks` wins; if `tasks` is empty/absent,
+    /// `message` is used as a single task (see `ActNode`).
+    #[serde(default)]
+    pub tasks: Option<Vec<String>>,
     #[serde(default)]
     pub note: Option<String>,
     /// Optional markdown note to persist to this project's notes regardless
@@ -107,7 +118,7 @@ pub struct Decision {
 
 impl Decision {
     fn wait(note: impl Into<String>) -> Self {
-        Decision { action: "wait".to_string(), message: None, note: Some(note.into()), add_note: None }
+        Decision { action: "wait".to_string(), message: None, tasks: None, note: Some(note.into()), add_note: None }
     }
 }
 
@@ -144,7 +155,11 @@ const SYSTEM_PROMPT: &str = "You are an autonomous orchestrator managing a singl
     the instance's current status and the most recent chat turns. Respond with ONLY a JSON \
     object (no markdown fences, no prose) of the shape: \
     {\"action\": \"wait\" | \"send_message\" | \"mark_done\" | \"mark_error\" | \"create_human_task\", \
-    \"message\": \"<only for send_message (steering text) or create_human_task (what the human needs to do)>\", \
+    \"message\": \"<only for send_message (steering text), or create_human_task with exactly ONE blocker>\", \
+    \"tasks\": [\"<blocker 1>\", \"<blocker 2>\", ...] (only for create_human_task — use this instead of \
+    message when the agent's reply lists two or more DISTINCT blockers, e.g. a numbered list of \
+    separate asks. Each entry becomes its own independently-resolvable task — never merge several \
+    unrelated blockers into one message string), \
     \"note\": \"<short human-readable reason>\", \
     \"add_note\": \"<optional markdown, any action — your own running notes on this project>\"}. \
     Use send_message to steer the agent or answer a pending question in prose. Use mark_done \
@@ -152,9 +167,12 @@ const SYSTEM_PROMPT: &str = "You are an autonomous orchestrator managing a singl
     agent is stuck in a way a message can't fix. Use create_human_task when you hit a blocker \
     only a person can resolve — missing credentials/access, an ambiguous decision outside your \
     authority, something requiring approval — this pauses the project until a person resolves \
-    it, so don't use it for things you could instead ask the agent about via send_message. Use \
-    add_note on any tick (including wait) to record findings, context, or progress worth \
-    keeping — it does not change what action is taken. Prefer wait when unsure.";
+    it, so don't use it for things you could instead ask the agent about via send_message. \
+    IMPORTANT: if the agent's reply enumerates multiple separate blockers (numbered or bulleted), \
+    split them into distinct entries in `tasks` rather than one combined `message` — this lets a \
+    human resolve each one independently. Use add_note on any tick (including wait) to record \
+    findings, context, or progress worth keeping — it does not change what action is taken. \
+    Prefer wait when unsure.";
 
 #[derive(Debug, Clone)]
 pub(crate) enum TickOutcome {
@@ -162,8 +180,10 @@ pub(crate) enum TickOutcome {
     Sent(String),
     Done,
     Error,
-    /// Carries the human task description — see `ActNode`.
-    Blocked(String),
+    /// Carries one or more human task descriptions — see `ActNode`. Almost
+    /// always length 1, but can be more when the conductor identifies
+    /// multiple discrete blockers in one tick.
+    Blocked(Vec<String>),
 }
 
 /// Per-tick graph state. One of these is built fresh from a `Project` DB row
@@ -172,6 +192,7 @@ pub(crate) enum TickOutcome {
 #[derive(Clone)]
 pub(crate) struct HeartbeatState {
     project_id: String,
+    project_name: String,
     goal: String,
     constellation: String,
     vape_instance_id: Option<String>,
@@ -234,25 +255,92 @@ impl Node<HeartbeatState> for RouteNode {
 /// creates (per project decision) — one instance per project.
 struct CreateInstanceNode {
     vape: Arc<VapeClient>,
+    conductor: Arc<Conductor>,
+    store: Arc<crate::store::Store>,
+}
+
+/// Turns a project name into a vape/k8s-safe instance-name slug: lowercase,
+/// anything outside `[a-z0-9-]` becomes `-`, repeated `-` collapse to one,
+/// leading/trailing `-` trimmed, clamped to 24 chars (leaving room for the
+/// id-suffix appended by the caller). Empty result (e.g. an all-emoji
+/// project name) signals the caller to fall back to the old id-only scheme.
+pub fn slugify(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_was_dash = false;
+    for c in name.trim().to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    let clamped = &trimmed[..24.min(trimmed.len())];
+    clamped.trim_matches('-').to_string()
+}
+
+/// Human-readable instance name: `{slug}-{first-6-of-project-id}`, falling
+/// back to the old `mfb-{first-8-of-project-id}` scheme if the project name
+/// slugifies to nothing (all-symbols/emoji/empty).
+pub fn instance_name(project_name: &str, project_id: &str) -> String {
+    let slug = slugify(project_name);
+    if slug.is_empty() {
+        let short = &project_id[..8.min(project_id.len())];
+        return format!("mfb-{short}");
+    }
+    let short = &project_id[..6.min(project_id.len())];
+    format!("{slug}-{short}")
+}
+
+/// Best-effort LLM-suggested instance-name slug, run through the same
+/// safety net as the deterministic path (`slugify`) so raw model output is
+/// never trusted as a k8s resource name unsanitized. Any failure (disabled
+/// conductor, network error, empty/unusable response) returns `None` —
+/// callers must fall back to the deterministic scheme, never block instance
+/// creation on this.
+async fn try_llm_slug(conductor: &Conductor, project_name: &str, goal: &str) -> Option<String> {
+    if !conductor.enabled() {
+        return None;
+    }
+    let raw = conductor.suggest_instance_slug(project_name, goal).await.ok()?;
+    let cleaned = slugify(raw.trim());
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 #[async_trait::async_trait]
 impl Node<HeartbeatState> for CreateInstanceNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
-        let short = &state.project_id[..8.min(state.project_id.len())];
+        let (name, naming_source) = match try_llm_slug(&self.conductor, &state.project_name, &state.goal).await {
+            Some(slug) => (format!("{slug}-{}", &state.project_id[..6.min(state.project_id.len())]), "llm_slug"),
+            None => (instance_name(&state.project_name, &state.project_id), "deterministic_slug"),
+        };
+
+        let model = crate::conductor::resolve_model(&self.store, "instance_model", "MAZZ_FLUX_INSTANCE_MODEL", crate::conductor::DEFAULT_MODEL).await;
+
         let req = CreateInstanceRequest {
-            name: format!("mfb-{short}"),
+            name,
             constellation: state.constellation.clone(),
             subdomain: None,
             ticket: None,
-            job: Some(JobConfig { prompt: state.goal.clone(), harness: Some("pida".to_string()) }),
+            job: Some(JobConfig { prompt: state.goal.clone(), harness: Some("pida".to_string()), model: Some(model) }),
         };
 
         let resp = self.vape.create_instance(&req).await.map_err(node_err("create_instance"))?;
 
+        let _ = self
+            .store
+            .log_action(Some(&state.project_id), None, "instance_name_chosen", Some(&serde_json::json!({"name": req.name, "source": naming_source})), None, None)
+            .await;
+
         if resp.get("dry_run").is_some() {
             return Ok(NodeOutcome::Update(Update::Noted(
-                "dry-run: would create instance (set MAZZ_FLUX_LIVE=1 to actually create)".to_string(),
+                "dry-run: would create instance (set MAZZ_FLUX_LIVE=0 to force dry-run)".to_string(),
             )));
         }
 
@@ -307,6 +395,7 @@ impl Node<HeartbeatState> for FetchStatusNode {
 
 struct DecideNode {
     conductor: Arc<Conductor>,
+    store: Arc<crate::store::Store>,
 }
 
 #[async_trait::async_trait]
@@ -314,9 +403,19 @@ impl Node<HeartbeatState> for DecideNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
         if !self.conductor.enabled() {
             return Ok(NodeOutcome::Update(Update::Decided(Decision::wait(
-                "no conductor configured (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY) — heartbeat is only observing, not acting",
+                "no conductor configured (set OPENROUTER_API_KEY) — heartbeat is only observing, not acting",
             ))));
         }
+
+        // Read fresh every tick (not cached) so editing agent_prompts/validation.md
+        // through the Files tab takes effect on the very next heartbeat, no
+        // restart needed — same pattern as conductor key resolution used to be.
+        let system = match self.store.read_agent_prompt("validation").await {
+            Ok(Some(validation)) if !validation.trim().is_empty() => format!(
+                "{SYSTEM_PROMPT}\n\nBefore choosing mark_done, you MUST also confirm the following validation criteria are satisfied:\n\n{validation}"
+            ),
+            _ => SYSTEM_PROMPT.to_string(),
+        };
 
         let user = serde_json::json!({
             "goal": state.goal,
@@ -325,7 +424,7 @@ impl Node<HeartbeatState> for DecideNode {
         })
         .to_string();
 
-        let decision = match self.conductor.decide(SYSTEM_PROMPT, &user).await {
+        let decision = match self.conductor.decide(&system, &user).await {
             Ok(text) => parse_conductor_response(&text),
             Err(e) => {
                 warn!(project_id = %state.project_id, error = %e, "conductor call failed — waiting");
@@ -365,8 +464,16 @@ impl Node<HeartbeatState> for ActNode {
             "mark_done" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Done, note, add_note))),
             "mark_error" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Error, note, add_note))),
             "create_human_task" => {
-                let description = decision.message.clone().unwrap_or_else(|| note.clone().unwrap_or_else(|| "conductor requested human intervention".to_string()));
-                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Blocked(description), note, add_note)))
+                // Prefer `tasks` (one or more discrete blockers) over the
+                // legacy single-`message` shape — lets the conductor split a
+                // multi-item reply (e.g. a numbered list from the pida
+                // instance) into separate, independently-resolvable
+                // HumanTask rows instead of one monolithic paragraph.
+                let descriptions: Vec<String> = match &decision.tasks {
+                    Some(tasks) if !tasks.is_empty() => tasks.iter().filter(|t| !t.trim().is_empty()).cloned().collect(),
+                    _ => vec![decision.message.clone().unwrap_or_else(|| note.clone().unwrap_or_else(|| "conductor requested human intervention".to_string()))],
+                };
+                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Blocked(descriptions), note, add_note)))
             }
             _ => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, note, add_note))),
         }
@@ -386,19 +493,19 @@ fn loop_guard() -> StepGuard<HeartbeatState> {
     })
 }
 
-fn build_graph(vape: Arc<VapeClient>, conductor: Arc<Conductor>) -> CompiledGraph<HeartbeatState> {
+fn build_graph(vape: Arc<VapeClient>, conductor: Arc<Conductor>, store: Arc<crate::store::Store>) -> CompiledGraph<HeartbeatState> {
     Graph::<HeartbeatState>::new()
         .add_node("route", RouteNode)
         .add_conditional("route", |s: &HeartbeatState| {
             if s.vape_instance_id.is_none() { "create_instance".to_string() } else { "fetch_status".to_string() }
         })
-        .add_node("create_instance", CreateInstanceNode { vape: vape.clone() })
+        .add_node("create_instance", CreateInstanceNode { vape: vape.clone(), conductor: conductor.clone(), store: store.clone() })
         .add_edge("create_instance", END)
         .add_node("fetch_status", FetchStatusNode { vape: vape.clone(), conductor: conductor.clone() })
         .add_conditional("fetch_status", |s: &HeartbeatState| {
             if s.harness.as_deref() == Some("pida") { "decide".to_string() } else { END.to_string() }
         })
-        .add_node("decide", DecideNode { conductor })
+        .add_node("decide", DecideNode { conductor, store })
         .add_edge("decide", "act")
         .add_node("act", ActNode { vape })
         .add_edge("act", END)
@@ -418,10 +525,8 @@ pub async fn run(state: AppState) {
         ticker.tick().await;
         state.heartbeat_clock.mark();
 
-        // Resolved fresh every tick (not cached) so a key saved through the
-        // settings UI mid-run takes effect on the very next tick.
         let conductor = Arc::new(Conductor::from_sources(&state.store).await);
-        let graph = build_graph(state.vape.clone(), conductor);
+        let graph = build_graph(state.vape.clone(), conductor, state.store.clone());
         let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
 
         if let Err(e) = tick(&state, &executor).await {
@@ -445,7 +550,7 @@ pub async fn force_tick(state: &AppState, project_id: &str) -> anyhow::Result<()
     let project = state.store.get_project(project_id).await?.ok_or_else(|| anyhow::anyhow!("project {project_id} not found"))?;
 
     let conductor = Arc::new(Conductor::from_sources(&state.store).await);
-    let graph = build_graph(state.vape.clone(), conductor);
+    let graph = build_graph(state.vape.clone(), conductor, state.store.clone());
     let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
 
     process_project(state, &executor, &project).await
@@ -468,6 +573,7 @@ async fn tick(state: &AppState, executor: &Executor<HeartbeatState>) -> anyhow::
 async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, project: &Project) -> anyhow::Result<()> {
     let initial = HeartbeatState {
         project_id: project.id.clone(),
+        project_name: project.name.clone(),
         goal: project.goal.clone(),
         constellation: project.constellation.clone(),
         vape_instance_id: project.vape_instance_id.clone(),
@@ -547,11 +653,13 @@ async fn persist_tick(state: &AppState, project: &Project, final_state: &Heartbe
             state.store.set_heartbeat_enabled(&project.id, false).await?;
             state.store.log_action(Some(&project.id), instance_id, "mark_error", None, final_state.note.as_deref(), None).await?;
         }
-        Some(TickOutcome::Blocked(description)) => {
-            let task = state.store.create_human_task(&project.id, description).await?;
+        Some(TickOutcome::Blocked(descriptions)) => {
+            for description in descriptions {
+                let task = state.store.create_human_task(&project.id, description).await?;
+                state.store.log_action(Some(&project.id), instance_id, "create_human_task", Some(&serde_json::json!({"task_id": task.id, "description": description})), final_state.note.as_deref(), None).await?;
+            }
             state.store.set_project_status(&project.id, ProjectStatus::Blocked, final_state.note.as_deref()).await?;
             state.store.set_heartbeat_enabled(&project.id, false).await?;
-            state.store.log_action(Some(&project.id), instance_id, "create_human_task", Some(&serde_json::json!({"task_id": task.id, "description": description})), final_state.note.as_deref(), None).await?;
         }
         _ => {
             state.store.touch_heartbeat(&project.id, final_state.note.as_deref()).await?;

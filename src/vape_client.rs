@@ -172,6 +172,14 @@ impl VapeClient {
         self.mutate(reqwest::Method::DELETE, &format!("/api/v1/instances/{id}"), None).await
     }
 
+    /// `POST /api/v1/instances/{id}/rename` — path extracted from the cadmium
+    /// binary (see PLAN.md), first live-fired from the project detail page's
+    /// rename control.
+    pub async fn rename_instance(&self, id: &str, name: &str) -> Result<serde_json::Value> {
+        let body = serde_json::json!({ "name": name });
+        self.mutate(reqwest::Method::POST, &format!("/api/v1/instances/{id}/rename"), Some(&body)).await
+    }
+
     /// `POST .../pida/api/chat` — send a message into the instance's live pida
     /// session (steer it, answer a question in prose, etc).
     pub async fn pida_send(&self, id: &str, message: &str) -> Result<serde_json::Value> {

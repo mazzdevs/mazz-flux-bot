@@ -25,12 +25,18 @@
   function renderBreadcrumb(path) {
     const parts = path ? path.split("/").filter(Boolean) : [];
     let acc = [];
-    const crumbs = [`<a href="#" data-nav="">root</a>`];
+    const crumbs = [`<a href="#" data-nav=""><svg class="icon"><use href="/icons.svg#icon-folder"></use></svg> root</a>`];
     for (const part of parts) {
       acc.push(part);
       crumbs.push(`<a href="#" data-nav="${escapeHtml(acc.join("/"))}">${escapeHtml(part)}</a>`);
     }
-    breadcrumbEl.innerHTML = crumbs.join(' <span class="sep">/</span> ');
+    breadcrumbEl.innerHTML = crumbs.join('<svg class="icon"><use href="/icons.svg#icon-chevron-right"></use></svg>');
+  }
+
+  function fileIconId(name) {
+    if (name.endsWith(".json")) return "icon-file-json";
+    if (name.endsWith(".md")) return "icon-file-text";
+    return "icon-file";
   }
 
   function fmtSize(n) {
@@ -46,9 +52,9 @@
     if (result.type !== "dir") return;
     listEl.innerHTML = (result.entries || [])
       .map((e) => {
-        const icon = e.is_dir ? "📁" : "📄";
+        const iconId = e.is_dir ? "icon-folder" : fileIconId(e.name);
         const meta = e.is_dir ? "" : `<span class="file-meta">${fmtSize(e.size)}</span>`;
-        return `<li><a href="#" data-open="${escapeHtml(e.path)}" data-is-dir="${e.is_dir}">${icon} ${escapeHtml(e.name)}</a>${meta}</li>`;
+        return `<li><a href="#" data-open="${escapeHtml(e.path)}" data-is-dir="${e.is_dir}"><svg class="icon"><use href="/icons.svg#${iconId}"></use></svg> ${escapeHtml(e.name)}</a>${meta}</li>`;
       })
       .join("") || `<li class="empty">Empty directory.</li>`;
   }
@@ -66,10 +72,10 @@
       </div>
       <textarea id="files-editor-textarea" spellcheck="false">${escapeHtml(openFile.content)}</textarea>
       <div class="files-editor-actions">
-        ${isJson ? `<button class="mini" id="files-format" type="button">Format JSON</button>` : ""}
-        <button class="mini" id="files-revert" type="button">Revert</button>
-        <button class="mini danger" id="files-delete" type="button">Delete</button>
-        <button id="files-save" type="button">Save</button>
+        ${isJson ? `<button class="btn-secondary" id="files-format" type="button">Format JSON</button>` : ""}
+        <button class="btn-secondary" id="files-revert" type="button">Revert</button>
+        <button class="btn-danger" id="files-delete" type="button"><svg class="icon"><use href="/icons.svg#icon-trash"></use></svg> Delete</button>
+        <button class="btn" id="files-save" type="button">Save</button>
       </div>
       <div id="files-status" class="files-status"></div>
     `;

@@ -2,22 +2,40 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>mazz-flux-bot</title>
   <link rel="stylesheet" href="/style.css" />
+  <script>
+    // Set the theme before first paint to avoid a flash of the wrong theme.
+    (function () {
+      var saved = localStorage.getItem("mfb-theme");
+      if (saved === "light" || saved === "dark") {
+        document.documentElement.setAttribute("data-theme", saved);
+      }
+    })();
+  </script>
 </head>
 <body>
   <header>
     <h1>mazz-flux-bot</h1>
     <p class="sub">one pida instance per project, heartbeat-driven</p>
     <div class="header-actions">
-      <button id="create-toggle" class="mini icon-btn" type="button" title="New project">+</button>
-      <button id="settings-toggle" class="mini" type="button">⚙ Settings</button>
+      <button id="create-toggle" class="btn-icon" type="button" aria-label="New project" title="New project">
+        <svg class="icon"><use href="/icons.svg#icon-plus"></use></svg>
+      </button>
+      <button id="theme-toggle" class="btn-icon" type="button" aria-label="Toggle light/dark theme" title="Toggle theme">
+        <svg class="icon" id="theme-icon"><use href="/icons.svg#icon-moon"></use></svg>
+      </button>
+      <button id="settings-toggle" class="btn-secondary" type="button">
+        <svg class="icon"><use href="/icons.svg#icon-settings"></use></svg>
+        Settings
+      </button>
     </div>
   </header>
 
   <dialog id="create-dialog">
     <form id="create-form">
-      <h2>New project</h2>
+      <h2><svg class="icon"><use href="/icons.svg#icon-plus"></use></svg> New project</h2>
       <label>Name</label>
       <input type="text" id="name" placeholder="name" required />
       <label>Constellation</label>
@@ -26,88 +44,86 @@
       <label>Goal</label>
       <textarea id="goal" placeholder="what should the agent accomplish?" required></textarea>
       <div class="dialog-actions">
-        <button type="button" id="create-close" class="mini">Cancel</button>
-        <button type="submit">Create</button>
+        <button type="button" id="create-close" class="btn-secondary">Cancel</button>
+        <button type="submit" class="btn">Create</button>
       </div>
     </form>
   </dialog>
 
   <dialog id="settings-dialog">
     <form id="settings-form">
-      <h2>Conductor settings</h2>
-      <p class="sub" id="settings-active"></p>
+      <h2><svg class="icon"><use href="/icons.svg#icon-settings"></use></svg> Model settings</h2>
+      <p class="sub">API key comes from the OPENROUTER_API_KEY environment variable only — this just picks which model to use.</p>
 
-      <fieldset>
-        <legend>Anthropic</legend>
-        <label>API key <span class="hint" id="anthropic-hint"></span></label>
-        <input type="password" id="anthropic-api-key" placeholder="sk-ant-... (leave blank to keep current)" autocomplete="off" />
-        <label>Model</label>
-        <input type="text" id="anthropic-model" placeholder="claude-sonnet-5" />
-        <button type="button" class="mini danger" data-clear="anthropic_api_key">Clear key</button>
-      </fieldset>
+      <label>Conductor model</label>
+      <input type="text" id="conductor-model" placeholder="openai/gpt-5.6-sol" />
+      <p class="sub" style="margin-top:0.25rem">Makes wait/steer/done decisions each heartbeat tick.</p>
 
-      <fieldset>
-        <legend>OpenRouter</legend>
-        <label>API key <span class="hint" id="openrouter-hint"></span></label>
-        <input type="password" id="openrouter-api-key" placeholder="sk-or-... (leave blank to keep current)" autocomplete="off" />
-        <label>Model</label>
-        <input type="text" id="openrouter-model" placeholder="openai/gpt-5.6-sol" />
-        <button type="button" class="mini danger" data-clear="openrouter_api_key">Clear key</button>
-      </fieldset>
-
-      <p class="sub">Anthropic wins if both are set. Keys are stored in settings.json in the state directory, never shown here again once saved.</p>
+      <label>Instance model</label>
+      <input type="text" id="instance-model" placeholder="openai/gpt-5.6-sol" />
+      <p class="sub" style="margin-top:0.25rem">Used by vape instances this bot spawns.</p>
 
       <div class="dialog-actions">
-        <button type="button" id="settings-close" class="mini">Close</button>
-        <button type="submit">Save</button>
+        <button type="button" id="settings-close" class="btn-secondary">Close</button>
+        <button type="submit" class="btn">Save</button>
       </div>
     </form>
   </dialog>
 
   <main>
-    <div class="tab-strip">
-      <button class="tab-btn active" id="tab-dashboard" data-tab="dashboard" type="button">Dashboard</button>
-      <button class="tab-btn" id="tab-files" data-tab="files" type="button">Files</button>
+    <div class="tab-strip" role="tablist">
+      <button class="tab-btn active" id="tab-dashboard" data-tab="dashboard" type="button" role="tab" aria-selected="true">
+        <svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> Dashboard
+      </button>
+      <button class="tab-btn" id="tab-files" data-tab="files" type="button" role="tab" aria-selected="false">
+        <svg class="icon"><use href="/icons.svg#icon-folder"></use></svg> Files
+      </button>
     </div>
 
     <div id="tab-panel-dashboard" class="tab-panel active">
-    <section id="human-tasks">
-      <h2>Human tasks <span class="badge" id="human-tasks-count"></span></h2>
-      <ul id="human-tasks-list" class="human-tasks-list"></ul>
-    </section>
-
-    <section id="projects">
-      <div class="section-header">
-        <h2>Projects</h2>
-        <div class="view-toggle">
-          <button id="view-list" class="mini icon-btn" type="button" title="List view">☰</button>
-          <button id="view-tiles" class="mini icon-btn" type="button" title="Tile view">▦</button>
+      <section id="projects">
+        <div class="section-header">
+          <h2><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> Projects</h2>
+          <div class="view-toggle">
+            <button id="view-list" class="btn-icon" type="button" aria-label="List view" title="List view">
+              <svg class="icon"><use href="/icons.svg#icon-list"></use></svg>
+            </button>
+            <button id="view-tiles" class="btn-icon" type="button" aria-label="Tile view" title="Tile view">
+              <svg class="icon"><use href="/icons.svg#icon-grid"></use></svg>
+            </button>
+          </div>
         </div>
-      </div>
 
-      <table id="projects-table">
-        <thead>
-          <tr>
-            <th>Name</th><th>Status</th><th>Instance</th><th>Goal</th><th>Last note</th><th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="projects-body"></tbody>
-      </table>
+        <table id="projects-table">
+          <thead>
+            <tr>
+              <th>Name</th><th>Status</th><th>Instance</th><th>Goal</th><th>Last note</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="projects-body"></tbody>
+        </table>
 
-      <div id="projects-tiles" class="projects-tiles"></div>
-    </section>
+        <div id="projects-tiles" class="projects-tiles"></div>
+      </section>
 
-    <section id="log">
-      <h2>Action log (global)</h2>
-      <ul id="log-list"></ul>
-    </section>
+      <section id="human-tasks">
+        <h2><svg class="icon"><use href="/icons.svg#icon-alert"></use></svg> Human tasks <span class="badge" id="human-tasks-count"></span></h2>
+        <ul id="human-tasks-list" class="human-tasks-list"></ul>
+      </section>
+
+      <section id="log">
+        <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Action log (global)</h2>
+        <ul id="log-list"></ul>
+      </section>
     </div>
 
     <div id="tab-panel-files" class="tab-panel">
       <section id="files">
         <div class="section-header">
-          <h2>State files</h2>
-          <button id="files-refresh" class="mini" type="button">Refresh</button>
+          <h2><svg class="icon"><use href="/icons.svg#icon-folder"></use></svg> State files</h2>
+          <button id="files-refresh" class="btn-secondary" type="button">
+            <svg class="icon"><use href="/icons.svg#icon-refresh"></use></svg> Refresh
+          </button>
         </div>
         <div id="files-breadcrumb" class="files-breadcrumb"></div>
         <div class="files-layout">
@@ -120,6 +136,7 @@
     </div>
   </main>
 
+  <script src="/theme.js"></script>
   <script src="/app.js"></script>
   <script src="/files.js"></script>
 </body>

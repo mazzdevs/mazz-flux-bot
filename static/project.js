@@ -79,8 +79,17 @@ async function loadProject() {
   document.getElementById("ov-created").textContent = formatRelative(p.created_at);
 
   const intervalInput = document.getElementById("interval-input");
-  if (document.activeElement !== intervalInput) {
-    intervalInput.value = p.heartbeat_interval_secs;
+  const intervalUnit = document.getElementById("interval-unit");
+  if (document.activeElement !== intervalInput && document.activeElement !== intervalUnit) {
+    // Pick the largest unit that divides evenly into whole numbers, so e.g.
+    // 900s displays as "15 minutes" instead of "900 seconds" — storage is
+    // always seconds regardless of what's shown here.
+    const secs = p.heartbeat_interval_secs;
+    let unit = 1;
+    if (secs % 3600 === 0) unit = 3600;
+    else if (secs % 60 === 0) unit = 60;
+    intervalInput.value = secs / unit;
+    intervalUnit.value = String(unit);
   }
 
   const canStart = p.status !== "running";
@@ -127,6 +136,32 @@ function renderCountdown() {
 
 setInterval(renderCountdown, 1000);
 
+const VAPE_DASHBOARD_URL = "https://vape.stable.dexus.io";
+
+async function loadInstanceLinks(p) {
+  const linksEl = document.getElementById("ov-instance-links");
+  const linksRow = document.getElementById("ov-instance-links-row");
+  const renameRow = document.getElementById("ov-instance-rename-row");
+  if (!p.vape_instance_id) {
+    linksRow.style.display = "none";
+    renameRow.style.display = "none";
+    return;
+  }
+  linksRow.style.display = "";
+  renameRow.style.display = "";
+  try {
+    const { instance } = await api(`/api/instances/${p.vape_instance_id}`);
+    const urls = instance?.urls || [];
+    const items = [
+      `<li><a href="${VAPE_DASHBOARD_URL}/instances/${escapeHtml(p.vape_instance_id)}" target="_blank" rel="noopener"><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> vape dashboard</a></li>`,
+      ...urls.map((u) => `<li><a href="${escapeHtml(u)}" target="_blank" rel="noopener"><svg class="icon"><use href="/icons.svg#icon-send"></use></svg> ${escapeHtml(u)}</a></li>`),
+    ];
+    linksEl.innerHTML = items.join("");
+  } catch (e) {
+    linksEl.innerHTML = `<li class="empty">failed to load instance links: ${escapeHtml(e.message)}</li>`;
+  }
+}
+
 async function loadInstanceStatus(p) {
   const body = document.getElementById("instance-status-body");
   if (!p.vape_instance_id) {
@@ -168,7 +203,7 @@ async function loadHumanTasks() {
               ${escapeHtml(t.description)}
               <div class="task-meta">${escapeHtml(t.status)} · ${escapeHtml(t.created_at)}${t.resolved_at ? " · resolved " + escapeHtml(t.resolved_at) : ""}</div>
             </div>
-            ${t.status === "open" ? `<button class="mini" data-resolve="${t.id}">Resolve</button>` : ""}
+            ${t.status === "open" ? `<button class="btn-secondary" data-resolve="${t.id}"><svg class="icon"><use href="/icons.svg#icon-check"></use></svg> Resolve</button>` : ""}
           </li>`
         )
         .join("")
@@ -239,7 +274,9 @@ document.getElementById("p-force-heartbeat").addEventListener("click", async (ev
 
 document.getElementById("interval-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  const value = parseInt(document.getElementById("interval-input").value, 10);
+  const raw = parseInt(document.getElementById("interval-input").value, 10);
+  const unit = parseInt(document.getElementById("interval-unit").value, 10);
+  const value = raw * unit;
   if (!Number.isFinite(value) || value < 5) {
     alert("Interval must be at least 5 seconds.");
     return;
@@ -249,6 +286,24 @@ document.getElementById("interval-form").addEventListener("submit", async (ev) =
     await tick();
   } catch (e) {
     alert(e.message);
+  }
+});
+
+document.getElementById("instance-rename-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const input = document.getElementById("instance-rename-input");
+  const statusEl = document.getElementById("instance-rename-status");
+  const name = input.value.trim();
+  if (!name) return;
+  try {
+    await api(`/api/projects/${projectId}/instance/rename`, { method: "POST", body: JSON.stringify({ name }) });
+    statusEl.textContent = "renamed";
+    statusEl.classList.remove("error");
+    input.value = "";
+    await tick();
+  } catch (e) {
+    statusEl.textContent = e.message;
+    statusEl.classList.add("error");
   }
 });
 
@@ -270,7 +325,7 @@ async function tick() {
   try {
     const p = await loadProject();
     renderCountdown();
-    await Promise.all([loadInstanceStatus(p), loadHumanTasks(), loadNotes(), loadLog()]);
+    await Promise.all([loadInstanceStatus(p), loadInstanceLinks(p), loadHumanTasks(), loadNotes(), loadLog()]);
   } catch (e) {
     console.error(e);
   }

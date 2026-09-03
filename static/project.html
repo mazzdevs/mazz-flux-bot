@@ -2,37 +2,80 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>mazz-flux-bot — project</title>
   <link rel="stylesheet" href="/style.css" />
+  <script>
+    (function () {
+      var saved = localStorage.getItem("mfb-theme");
+      if (saved === "light" || saved === "dark") {
+        document.documentElement.setAttribute("data-theme", saved);
+      }
+    })();
+  </script>
 </head>
 <body>
   <header>
-    <p class="sub"><a class="project-link" href="/">← Dashboard</a></p>
+    <a class="back-link" href="/">
+      <svg class="icon"><use href="/icons.svg#icon-chevron-left"></use></svg> Dashboard
+    </a>
     <h1 id="project-name">Loading…</h1>
     <p class="sub" id="project-goal"></p>
     <div class="header-actions">
-      <button id="p-force-heartbeat" class="mini" type="button" title="Run a heartbeat tick for this project right now">⟳ Force heartbeat</button>
-      <button id="p-start" class="mini" type="button">Start</button>
-      <button id="p-pause" class="mini" type="button">Pause</button>
-      <button id="p-delete" class="mini danger" type="button">Delete</button>
+      <button id="theme-toggle" class="btn-icon" type="button" aria-label="Toggle light/dark theme" title="Toggle theme">
+        <svg class="icon" id="theme-icon"><use href="/icons.svg#icon-moon"></use></svg>
+      </button>
+      <button id="p-force-heartbeat" class="btn-secondary" type="button" title="Run a heartbeat tick for this project right now">
+        <svg class="icon"><use href="/icons.svg#icon-refresh"></use></svg> Force heartbeat
+      </button>
+      <div class="btn-group">
+        <button id="p-start" class="btn-secondary" type="button">
+          <svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Start
+        </button>
+        <button id="p-pause" class="btn-secondary" type="button">
+          <svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Pause
+        </button>
+        <button id="p-delete" class="btn-danger" type="button">
+          <svg class="icon"><use href="/icons.svg#icon-trash"></use></svg> Delete
+        </button>
+      </div>
     </div>
   </header>
 
   <main>
     <section id="overview">
-      <h2>Overview</h2>
+      <h2><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> Overview</h2>
       <table class="kv">
         <tbody>
           <tr><th>Status</th><td id="ov-status"></td></tr>
           <tr><th>Constellation</th><td id="ov-constellation"></td></tr>
           <tr><th>Instance</th><td id="ov-instance"></td></tr>
+          <tr id="ov-instance-links-row">
+            <th>Instance links</th>
+            <td><ul id="ov-instance-links" class="instance-links"></ul></td>
+          </tr>
+          <tr id="ov-instance-rename-row">
+            <th>Rename instance</th>
+            <td>
+              <form id="instance-rename-form" class="inline-form">
+                <input type="text" id="instance-rename-input" placeholder="new instance name" />
+                <button type="submit" class="btn-secondary">Rename</button>
+              </form>
+              <div id="instance-rename-status" class="files-status"></div>
+            </td>
+          </tr>
           <tr><th>Heartbeat</th><td id="ov-heartbeat"></td></tr>
           <tr>
             <th>Heartbeat interval</th>
             <td>
               <form id="interval-form" class="inline-form">
-                <input type="number" id="interval-input" min="5" step="1" /> seconds
-                <button type="submit" class="mini">Save</button>
+                <input type="number" id="interval-input" min="1" step="1" />
+                <select id="interval-unit">
+                  <option value="1">seconds</option>
+                  <option value="60">minutes</option>
+                  <option value="3600">hours</option>
+                </select>
+                <button type="submit" class="btn-secondary">Save</button>
               </form>
             </td>
           </tr>
@@ -45,35 +88,38 @@
     </section>
 
     <section id="instance-status">
-      <h2>Live instance status</h2>
+      <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Live instance status</h2>
       <div id="instance-status-body" class="sub">No instance yet.</div>
     </section>
 
     <section id="send-message">
-      <h2>Send a message</h2>
+      <h2><svg class="icon"><use href="/icons.svg#icon-send"></use></svg> Send a message</h2>
       <form id="message-form">
         <textarea id="message-text" placeholder="steer the agent, or answer a pending question…"></textarea>
-        <button type="submit">Send</button>
+        <button type="submit" class="btn">
+          <svg class="icon"><use href="/icons.svg#icon-send"></use></svg> Send
+        </button>
       </form>
     </section>
 
     <section id="human-tasks-section">
-      <h2>Human tasks</h2>
+      <h2><svg class="icon"><use href="/icons.svg#icon-alert"></use></svg> Human tasks</h2>
       <ul id="p-human-tasks" class="human-tasks-list"></ul>
     </section>
 
     <section id="notes-section">
-      <h2>Notes</h2>
+      <h2><svg class="icon"><use href="/icons.svg#icon-note"></use></svg> Notes</h2>
       <ul id="p-notes" class="notes-list"></ul>
     </section>
 
     <section id="heartbeat-activity">
-      <h2>Heartbeat activity</h2>
+      <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Heartbeat activity</h2>
       <p class="sub">Every heartbeat tick for this project logs here, including ticks that took no action.</p>
       <ul id="p-log" class="log-list"></ul>
     </section>
   </main>
 
+  <script src="/theme.js"></script>
   <script src="/project.js"></script>
 </body>
 </html>

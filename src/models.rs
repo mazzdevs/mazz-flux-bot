@@ -224,6 +224,11 @@ pub struct JobConfig {
     /// "pida" per project decision to standardize on the pida harness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// Which model the spawned instance's agent uses — confirmed real via
+    /// this environment's own `BILDA_AUTO_JOB` env var, which has a sibling
+    /// `model`/`effort` shape on the same job-config concept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -71,12 +71,11 @@ async function loadConstellations() {
 
 function projectActionsHtml(p) {
   const canStart = p.status !== "running";
-  return [
+  return `<div class="btn-group">${
     canStart
-      ? `<button class="mini" data-act="start" data-id="${p.id}">Start</button>`
-      : `<button class="mini" data-act="pause" data-id="${p.id}">Pause</button>`,
-    `<button class="mini danger" data-act="delete" data-id="${p.id}">Delete</button>`,
-  ].join("");
+      ? `<button class="btn-secondary" data-act="start" data-id="${p.id}"><svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Start</button>`
+      : `<button class="btn-secondary" data-act="pause" data-id="${p.id}"><svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Pause</button>`
+  }<button class="btn-danger" data-act="delete" data-id="${p.id}"><svg class="icon"><use href="/icons.svg#icon-trash"></use></svg></button></div>`;
 }
 
 async function loadProjects() {
@@ -144,7 +143,7 @@ async function loadHumanTasks() {
               ${escapeHtml(t.description)}
               <div class="task-meta">${escapeHtml(t.created_at)}</div>
             </div>
-            <button class="mini" data-resolve="${t.id}">Resolve</button>
+            <button class="btn-secondary" data-resolve="${t.id}"><svg class="icon"><use href="/icons.svg#icon-check"></use></svg> Resolve</button>
           </li>`
         )
         .join("")
@@ -227,23 +226,27 @@ viewListBtn.addEventListener("click", () => applyView("list"));
 viewTilesBtn.addEventListener("click", () => applyView("tiles"));
 applyView(localStorage.getItem(VIEW_KEY) || "list");
 
-// ---- Settings dialog --------------------------------------------------
+async function tick() {
+  try {
+    await Promise.all([loadProjects(), loadLog(), loadHumanTasks()]);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+loadConstellations();
+tick();
+setInterval(tick, 5000);
+
+// ---- Settings dialog (model selection only — no API keys) --------------
 
 const settingsDialog = document.getElementById("settings-dialog");
 
-function applySettingsStatus(s) {
-  const activeLabel = { anthropic: "Anthropic", openrouter: "OpenRouter", none: "none (observe-only)" }[s.active_backend] || s.active_backend;
-  document.getElementById("settings-active").textContent = `Active conductor: ${activeLabel}`;
-
-  document.getElementById("anthropic-hint").textContent = s.anthropic_key_set ? `set (${s.anthropic_key_preview})` : "not set";
-  document.getElementById("anthropic-model").placeholder = s.anthropic_model;
-  document.getElementById("openrouter-hint").textContent = s.openrouter_key_set ? `set (${s.openrouter_key_preview})` : "not set";
-  document.getElementById("openrouter-model").placeholder = s.openrouter_model;
-}
-
 async function loadSettings() {
   try {
-    applySettingsStatus(await api("/api/settings"));
+    const s = await api("/api/settings");
+    document.getElementById("conductor-model").value = s.conductor_model;
+    document.getElementById("instance-model").value = s.instance_model;
   } catch (e) {
     console.warn("failed to load settings", e);
   }
@@ -257,52 +260,15 @@ document.getElementById("settings-close").addEventListener("click", () => settin
 
 document.getElementById("settings-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  // Only send fields the user actually typed into — an untouched/blank
-  // field means "leave unchanged", not "clear this key" (see api.rs's
-  // UpdateSettingsRequest doc comment). Model fields are safe to always
-  // send since they aren't secrets.
-  const body = {};
-  const anthropicKey = document.getElementById("anthropic-api-key").value;
-  const openrouterKey = document.getElementById("openrouter-api-key").value;
-  if (anthropicKey) body.anthropic_api_key = anthropicKey;
-  if (openrouterKey) body.openrouter_api_key = openrouterKey;
-  const anthropicModel = document.getElementById("anthropic-model").value.trim();
-  const openrouterModel = document.getElementById("openrouter-model").value.trim();
-  if (anthropicModel) body.anthropic_model = anthropicModel;
-  if (openrouterModel) body.openrouter_model = openrouterModel;
-
+  const conductorModel = document.getElementById("conductor-model").value.trim();
+  const instanceModel = document.getElementById("instance-model").value.trim();
   try {
-    applySettingsStatus(await api("/api/settings", { method: "POST", body: JSON.stringify(body) }));
-    document.getElementById("anthropic-api-key").value = "";
-    document.getElementById("openrouter-api-key").value = "";
+    await api("/api/settings", { method: "POST", body: JSON.stringify({ conductor_model: conductorModel, instance_model: instanceModel }) });
+    settingsDialog.close();
   } catch (e) {
     alert(e.message);
   }
 });
-
-document.querySelectorAll("#settings-dialog button[data-clear]").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    const key = btn.dataset.clear;
-    if (!confirm(`Clear the ${key === "anthropic_api_key" ? "Anthropic" : "OpenRouter"} key?`)) return;
-    try {
-      applySettingsStatus(await api("/api/settings", { method: "POST", body: JSON.stringify({ [key]: "" }) }));
-    } catch (e) {
-      alert(e.message);
-    }
-  });
-});
-
-async function tick() {
-  try {
-    await Promise.all([loadProjects(), loadLog(), loadHumanTasks()]);
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-loadConstellations();
-tick();
-setInterval(tick, 5000);
 
 // ---- Top-level tab strip (Dashboard / Files) ---------------------------
 

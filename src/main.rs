@@ -12,12 +12,12 @@ use mazz_flux_bot::store::Store;
 use mazz_flux_bot::vape_client::VapeClient;
 use mazz_flux_bot::{api, heartbeat, state_repo, AppState};
 
-async fn log_conductor_status(store: &Store) {
-    let conductor = Conductor::from_sources(store).await;
+fn log_conductor_status() {
+    let conductor = Conductor::from_env();
     if conductor.enabled() {
         tracing::info!(backend = conductor.label(), "conductor configured");
     } else {
-        tracing::warn!("no conductor configured (Settings panel, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY) — heartbeat will observe instances but won't make steering decisions");
+        tracing::warn!("no conductor configured (set OPENROUTER_API_KEY) — heartbeat will observe instances but won't make steering decisions");
     }
 }
 
@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     state_repo::ensure_init(&dir).await.unwrap_or_else(|e| tracing::warn!(error = %e, "state repo init failed — commits will fail until this is fixed"));
 
     let vape = Arc::new(VapeClient::new());
-    log_conductor_status(&store).await;
+    log_conductor_status();
 
     // Scan-loop cadence (how often we check which projects are due) —
     // distinct from each project's own heartbeat interval, which defaults to
@@ -89,7 +89,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/files", get(api::browse_files).put(api::write_file).delete(api::delete_file))
         .route("/api/heartbeat/status", get(api::heartbeat_status))
         .route("/api/projects/{id}/heartbeat/force", post(api::force_heartbeat))
-        .route("/api/projects/{id}/heartbeat-interval", post(api::set_heartbeat_interval));
+        .route("/api/projects/{id}/heartbeat-interval", post(api::set_heartbeat_interval))
+        .route("/api/projects/{id}/instance/rename", post(api::rename_instance));
 
     let app = Router::new()
         .merge(api_routes)
