@@ -385,6 +385,7 @@ section h2 svg.icon { color: var(--accent); }
 .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-4); }
 .section-header h2 { margin: 0; }
 .view-toggle { display: flex; gap: var(--sp-1); }
+.section-header-actions { display: flex; align-items: center; gap: var(--sp-3); }
 
 /* ==========================================================================
    Tables

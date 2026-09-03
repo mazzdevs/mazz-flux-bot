@@ -20,9 +20,6 @@
     <h1>mazz-flux-bot</h1>
     <p class="sub">one pida instance per project, heartbeat-driven</p>
     <div class="header-actions">
-      <button id="create-toggle" class="btn-icon" type="button" aria-label="New project" title="New project">
-        <svg class="icon"><use href="/icons.svg#icon-plus"></use></svg>
-      </button>
       <button id="theme-toggle" class="btn-icon" type="button" aria-label="Toggle light/dark theme" title="Toggle theme">
         <svg class="icon" id="theme-icon"><use href="/icons.svg#icon-moon"></use></svg>
       </button>
@@ -84,12 +81,17 @@
       <section id="projects">
         <div class="section-header">
           <h2><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> Projects</h2>
-          <div class="view-toggle">
-            <button id="view-list" class="btn-icon" type="button" aria-label="List view" title="List view">
-              <svg class="icon"><use href="/icons.svg#icon-list"></use></svg>
-            </button>
-            <button id="view-tiles" class="btn-icon" type="button" aria-label="Tile view" title="Tile view">
-              <svg class="icon"><use href="/icons.svg#icon-grid"></use></svg>
+          <div class="section-header-actions">
+            <div class="view-toggle">
+              <button id="view-list" class="btn-icon" type="button" aria-label="List view" title="List view">
+                <svg class="icon"><use href="/icons.svg#icon-list"></use></svg>
+              </button>
+              <button id="view-tiles" class="btn-icon" type="button" aria-label="Tile view" title="Tile view">
+                <svg class="icon"><use href="/icons.svg#icon-grid"></use></svg>
+              </button>
+            </div>
+            <button id="create-toggle" class="btn" type="button">
+              <svg class="icon"><use href="/icons.svg#icon-plus"></use></svg> New project
             </button>
           </div>
         </div>
