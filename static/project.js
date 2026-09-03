@@ -448,20 +448,6 @@ document.getElementById("interval-form").addEventListener("submit", async (ev) =
   }
 });
 
-document.getElementById("message-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const textarea = document.getElementById("message-text");
-  const message = textarea.value.trim();
-  if (!message) return;
-  try {
-    await api(`/api/projects/${projectId}/message`, { method: "POST", body: JSON.stringify({ message }) });
-    textarea.value = "";
-    await tick();
-  } catch (e) {
-    alert(e.message);
-  }
-});
-
 async function tick() {
   try {
     const p = await loadProject();

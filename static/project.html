@@ -137,21 +137,6 @@
       <p id="kanban-status" class="files-status" role="status"></p>
     </section>
 
-    <section id="instance-status">
-      <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Live instance status</h2>
-      <div id="instance-status-body" class="sub">No instance yet.</div>
-    </section>
-
-    <section id="send-message">
-      <h2><svg class="icon"><use href="/icons.svg#icon-send"></use></svg> Send a message</h2>
-      <form id="message-form">
-        <textarea id="message-text" placeholder="steer the agent, or answer a pending question…"></textarea>
-        <button type="submit" class="btn">
-          <svg class="icon"><use href="/icons.svg#icon-send"></use></svg> Send
-        </button>
-      </form>
-    </section>
-
     <section id="human-tasks-section">
       <h2><svg class="icon"><use href="/icons.svg#icon-alert"></use></svg> Human tasks</h2>
       <ul id="p-human-tasks" class="human-tasks-list"></ul>
@@ -167,9 +152,14 @@
       <p class="sub">Every heartbeat tick for this project logs here, including ticks that took no action.</p>
       <ul id="p-log" class="log-list"></ul>
     </section>
+
+    <section id="instance-status">
+      <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Live instance status</h2>
+      <div id="instance-status-body" class="sub">No instance yet.</div>
+    </section>
   </main>
 
   <script src="/theme.js"></script>
-  <script src="/project.js?v=3"></script>
+  <script src="/project.js?v=4"></script>
 </body>
 </html>
