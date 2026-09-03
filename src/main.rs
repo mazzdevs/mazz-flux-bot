@@ -7,6 +7,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use mazz_flux_bot::conductor::Conductor;
+use mazz_flux_bot::heartbeat::HeartbeatClock;
 use mazz_flux_bot::store::Store;
 use mazz_flux_bot::vape_client::VapeClient;
 use mazz_flux_bot::{api, heartbeat, state_repo, AppState};
@@ -58,7 +59,13 @@ async fn main() -> anyhow::Result<()> {
     let vape = Arc::new(VapeClient::new());
     log_conductor_status(&store).await;
 
-    let state = AppState { store, vape };
+    // Scan-loop cadence (how often we check which projects are due) —
+    // distinct from each project's own heartbeat interval, which defaults to
+    // 15 minutes and is editable per project (see `models::Project`).
+    let interval_secs: u64 = std::env::var("HEARTBEAT_SCAN_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(heartbeat::DEFAULT_SCAN_INTERVAL_SECS);
+    let heartbeat_clock = Arc::new(HeartbeatClock::new(interval_secs));
+
+    let state = AppState { store, vape, heartbeat_clock };
 
     tokio::spawn(heartbeat::run(state.clone()));
 
@@ -79,7 +86,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/constellations", get(api::list_constellations))
         .route("/api/settings", get(api::get_settings).post(api::update_settings))
         .route("/api/state/commit", post(api::commit_state))
-        .route("/api/files", get(api::browse_files).put(api::write_file).delete(api::delete_file));
+        .route("/api/files", get(api::browse_files).put(api::write_file).delete(api::delete_file))
+        .route("/api/heartbeat/status", get(api::heartbeat_status))
+        .route("/api/projects/{id}/heartbeat/force", post(api::force_heartbeat))
+        .route("/api/projects/{id}/heartbeat-interval", post(api::set_heartbeat_interval));
 
     let app = Router::new()
         .merge(api_routes)

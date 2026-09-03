@@ -10,7 +10,7 @@ async fn store_round_trips_everything() {
     let store = Store::open(&dir).await.expect("open store");
 
     let project = store
-        .create_project(CreateProjectRequest { name: "t".into(), goal: "g".into(), constellation: None })
+        .create_project(CreateProjectRequest { name: "t".into(), goal: "g".into(), constellation: None, heartbeat_interval_secs: None })
         .await
         .expect("create project");
 
@@ -18,6 +18,15 @@ async fn store_round_trips_everything() {
     let fetched = store.get_project(&project.id).await.unwrap().unwrap();
     assert_eq!(fetched.status, "running");
     assert_eq!(fetched.last_note.as_deref(), Some("started"));
+
+    assert_eq!(project.heartbeat_interval_secs, mazz_flux_bot::heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS);
+    store.set_heartbeat_interval(&project.id, 90).await.unwrap();
+    let updated = store.get_project(&project.id).await.unwrap().unwrap();
+    assert_eq!(updated.heartbeat_interval_secs, 90);
+    // Below-minimum values are clamped, not rejected.
+    store.set_heartbeat_interval(&project.id, 1).await.unwrap();
+    let clamped = store.get_project(&project.id).await.unwrap().unwrap();
+    assert_eq!(clamped.heartbeat_interval_secs, 5);
 
     let note = store.add_project_note(&project.id, "# hello\nsome markdown").await.unwrap();
     let notes = store.list_project_notes(&project.id).await.unwrap();

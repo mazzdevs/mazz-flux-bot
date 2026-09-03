@@ -276,3 +276,44 @@ pub async fn delete_file(State(state): State<AppState>, Query(q): Query<FilesQue
     state.store.log_action(None, None, "file_deleted", Some(&json!({"path": path})), None, None).await?;
     Ok(Json(json!({ "ok": true })))
 }
+
+// ---- Heartbeat clock / force tick -----------------------------------------
+
+/// Countdown info for the periodic heartbeat loop — last/next tick time and
+/// its interval. Same for every project (the loop processes all running
+/// projects in one pass), so this isn't project-scoped.
+pub async fn heartbeat_status(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(state.heartbeat_clock.status()))
+}
+
+/// Forces one heartbeat tick for this project right now, independent of the
+/// periodic loop's own countdown — useful when a project is stuck on a
+/// transient error (e.g. "Instance not ready") and waiting for the next
+/// automatic tick is unnecessary.
+pub async fn force_heartbeat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    crate::heartbeat::force_tick(&state, &id).await?;
+    state.store.log_action(Some(&id), None, "heartbeat_forced", None, None, None).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct SetHeartbeatIntervalRequest {
+    pub heartbeat_interval_secs: u64,
+}
+
+/// Per-project heartbeat cadence override (default 15 minutes, see
+/// `models::default_heartbeat_interval_secs`). Takes effect on this
+/// project's next due-check — no restart needed.
+pub async fn set_heartbeat_interval(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetHeartbeatIntervalRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.store.set_heartbeat_interval(&id, req.heartbeat_interval_secs).await?;
+    state
+        .store
+        .log_action(Some(&id), None, "heartbeat_interval_updated", Some(&json!({"heartbeat_interval_secs": req.heartbeat_interval_secs})), None, None)
+        .await?;
+    let project = state.store.get_project(&id).await?;
+    Ok(Json(json!({ "project": project })))
+}

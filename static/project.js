@@ -17,6 +17,39 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// ---- Relative time formatting ------------------------------------------
+
+function formatRelative(iso) {
+  if (!iso) return "never";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return iso;
+  const diffMs = Date.now() - then;
+  const future = diffMs < 0;
+  const abs = Math.abs(diffMs);
+  const sec = Math.round(abs / 1000);
+  const units = [
+    ["year", 31536000],
+    ["month", 2592000],
+    ["day", 86400],
+    ["hour", 3600],
+    ["minute", 60],
+    ["second", 1],
+  ];
+  let label;
+  if (sec < 5) {
+    label = "just now";
+    return future ? "in a moment" : label;
+  }
+  for (const [name, secs] of units) {
+    const count = Math.floor(sec / secs);
+    if (count >= 1) {
+      label = `${count} ${name}${count === 1 ? "" : "s"}`;
+      break;
+    }
+  }
+  return future ? `in ${label}` : `${label} ago`;
+}
+
 function statusClass(status) {
   if (status === "running") return "status-running";
   if (status === "error") return "status-error";
@@ -39,9 +72,16 @@ async function loadProject() {
   document.getElementById("ov-constellation").textContent = p.constellation;
   document.getElementById("ov-instance").innerHTML = p.vape_instance_id ? `<code>${escapeHtml(p.vape_instance_id)}</code>` : "none yet";
   document.getElementById("ov-heartbeat").textContent = p.heartbeat_enabled ? "enabled" : "disabled";
-  document.getElementById("ov-last-heartbeat").textContent = p.last_heartbeat_at || "never";
+  document.getElementById("ov-last-heartbeat").title = p.last_heartbeat_at || "";
+  document.getElementById("ov-last-heartbeat").textContent = formatRelative(p.last_heartbeat_at);
   document.getElementById("ov-last-note").textContent = p.last_note || "";
-  document.getElementById("ov-created").textContent = p.created_at;
+  document.getElementById("ov-created").title = p.created_at;
+  document.getElementById("ov-created").textContent = formatRelative(p.created_at);
+
+  const intervalInput = document.getElementById("interval-input");
+  if (document.activeElement !== intervalInput) {
+    intervalInput.value = p.heartbeat_interval_secs;
+  }
 
   const canStart = p.status !== "running";
   document.getElementById("p-start").style.display = canStart ? "" : "none";
@@ -49,6 +89,43 @@ async function loadProject() {
 
   return p;
 }
+
+// ---- Next-heartbeat countdown -------------------------------------------
+//
+// Computed client-side from last_heartbeat_at (or created_at, if it has
+// never ticked) + heartbeat_interval_secs, and re-rendered every second
+// independent of the 5s data poll so the countdown itself feels live. If
+// heartbeat_enabled is false, there's no countdown to show.
+
+function nextHeartbeatAt(p) {
+  const base = p.last_heartbeat_at || p.created_at;
+  if (!base) return null;
+  return new Date(base).getTime() + p.heartbeat_interval_secs * 1000;
+}
+
+function renderCountdown() {
+  const el = document.getElementById("ov-next-heartbeat");
+  if (!currentProject || !currentProject.heartbeat_enabled) {
+    el.textContent = "heartbeat disabled";
+    return;
+  }
+  const next = nextHeartbeatAt(currentProject);
+  if (next === null) {
+    el.textContent = "unknown";
+    return;
+  }
+  const remainingMs = next - Date.now();
+  if (remainingMs <= 0) {
+    el.textContent = "due now";
+    return;
+  }
+  const totalSec = Math.ceil(remainingMs / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  el.textContent = m > 0 ? `in ${m}m ${s}s` : `in ${s}s`;
+}
+
+setInterval(renderCountdown, 1000);
 
 async function loadInstanceStatus(p) {
   const body = document.getElementById("instance-status-body");
@@ -123,9 +200,9 @@ async function loadLog() {
   list.innerHTML = (entries || [])
     .map(
       (e) =>
-        `<li><span class="action">${escapeHtml(e.action)}</span><span class="ts">${escapeHtml(e.created_at)}</span><br/>${escapeHtml(
-          e.error || e.result || ""
-        ).slice(0, 300)}</li>`
+        `<li><span class="action">${escapeHtml(e.action)}</span><span class="ts" title="${escapeHtml(e.created_at)}">${escapeHtml(
+          formatRelative(e.created_at)
+        )}</span><br/>${escapeHtml(e.error || e.result || "").slice(0, 300)}</li>`
     )
     .join("");
 }
@@ -142,6 +219,37 @@ document.getElementById("p-delete").addEventListener("click", async () => {
   if (!confirm("Delete this project? (does not delete the vape instance)")) return;
   await api(`/api/projects/${projectId}`, { method: "DELETE" });
   location.href = "/";
+});
+
+document.getElementById("p-force-heartbeat").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Ticking…";
+  try {
+    await api(`/api/projects/${projectId}/heartbeat/force`, { method: "POST" });
+    await tick();
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+});
+
+document.getElementById("interval-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const value = parseInt(document.getElementById("interval-input").value, 10);
+  if (!Number.isFinite(value) || value < 5) {
+    alert("Interval must be at least 5 seconds.");
+    return;
+  }
+  try {
+    await api(`/api/projects/${projectId}/heartbeat-interval`, { method: "POST", body: JSON.stringify({ heartbeat_interval_secs: value }) });
+    await tick();
+  } catch (e) {
+    alert(e.message);
+  }
 });
 
 document.getElementById("message-form").addEventListener("submit", async (ev) => {
@@ -161,6 +269,7 @@ document.getElementById("message-form").addEventListener("submit", async (ev) =>
 async function tick() {
   try {
     const p = await loadProject();
+    renderCountdown();
     await Promise.all([loadInstanceStatus(p), loadHumanTasks(), loadNotes(), loadLog()]);
   } catch (e) {
     console.error(e);

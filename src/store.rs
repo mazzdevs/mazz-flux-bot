@@ -162,6 +162,7 @@ impl Store {
             status: ProjectStatus::Draft.as_str().to_string(),
             vape_instance_id: None,
             heartbeat_enabled: false,
+            heartbeat_interval_secs: req.heartbeat_interval_secs.unwrap_or(crate::heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS),
             last_note: None,
             created_at: ts.clone(),
             updated_at: ts,
@@ -227,6 +228,13 @@ impl Store {
 
     pub async fn set_heartbeat_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.update_project(id, |p| p.heartbeat_enabled = enabled).await
+    }
+
+    /// Per-project heartbeat cadence override — minimum 5 seconds, mostly to
+    /// stop a fat-fingered `0` from turning a project into a busy-loop.
+    pub async fn set_heartbeat_interval(&self, id: &str, interval_secs: u64) -> Result<()> {
+        let interval_secs = interval_secs.max(5);
+        self.update_project(id, |p| p.heartbeat_interval_secs = interval_secs).await
     }
 
     pub async fn touch_heartbeat(&self, id: &str, note: Option<&str>) -> Result<()> {

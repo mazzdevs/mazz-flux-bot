@@ -9,6 +9,7 @@ pub mod vape_client;
 
 use std::sync::Arc;
 
+use heartbeat::HeartbeatClock;
 use store::Store;
 use vape_client::VapeClient;
 
@@ -20,4 +21,5 @@ use vape_client::VapeClient;
 pub struct AppState {
     pub store: Arc<Store>,
     pub vape: Arc<VapeClient>,
+    pub heartbeat_clock: Arc<HeartbeatClock>,
 }

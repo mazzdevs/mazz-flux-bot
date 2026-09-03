@@ -55,10 +55,24 @@ pub struct Project {
     pub status: String,
     pub vape_instance_id: Option<String>,
     pub heartbeat_enabled: bool,
+    /// How often the heartbeat loop ticks this project, in seconds. Defaults
+    /// to `heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS` (15 minutes) for new
+    /// projects, editable per project via `PATCH
+    /// /api/projects/{id}/heartbeat-interval`.
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
     pub last_note: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub last_heartbeat_at: Option<String>,
+}
+
+/// Serde default for `Project::heartbeat_interval_secs` — keeps `models.rs`
+/// free of a direct dependency on `heartbeat.rs` for the literal, while still
+/// reading pre-existing project JSON files written before this field existed
+/// (missing field → 15 minutes, not 0).
+fn default_heartbeat_interval_secs() -> u64 {
+    15 * 60
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,6 +81,9 @@ pub struct CreateProjectRequest {
     pub goal: String,
     #[serde(default)]
     pub constellation: Option<String>,
+    /// Defaults to `heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS` if omitted.
+    #[serde(default)]
+    pub heartbeat_interval_secs: Option<u64>,
 }
 
 /// One row in the action_log table — every mutating call the tool made (or, in

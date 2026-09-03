@@ -105,3 +105,27 @@ navigation, and an "up one level" control.
   anywhere in the environment).
 - Added `tests/store_smoke.rs::file_browser_reads_writes_and_blocks_escapes` covering
   write/read/edit/delete round-trips plus both escape classes (`../`, `.git`).
+
+## Executed (2026-09-03) — force-heartbeat, per-project interval, relative times
+
+- **Force heartbeat button** (project detail page): `POST /api/projects/{id}/heartbeat/force`
+  → `heartbeat::force_tick`, which runs one full graph tick for that single project
+  immediately, bypassing both the `heartbeat_enabled`/`status == running` filter and the
+  per-project due-check. Verified live against the real running project — correctly ran
+  the conductor and raised a second human task.
+- **Per-project heartbeat interval, default 15 minutes**: `Project.heartbeat_interval_secs`
+  (new field, serde-defaults to 900 for old project files with no such field, so no
+  migration needed). Editable via `POST /api/projects/{id}/heartbeat-interval` (min
+  5s, clamps rather than rejects). The periodic loop's own scan cadence
+  (`HEARTBEAT_SCAN_INTERVAL_SECS`, default 15s) is now a separate concept from any one
+  project's interval — the scan loop wakes up frequently and only actually ticks a
+  project once `is_due()` says its own interval has elapsed since `last_heartbeat_at`.
+- **Countdown timer** on the project detail page: computed client-side from
+  `last_heartbeat_at` (or `created_at` if never ticked) + `heartbeat_interval_secs`,
+  re-rendered every second independent of the 5s data poll.
+- **Relative time formatting** (`formatRelative`, "4 minutes ago" / "in 3m 20s" style) —
+  added to both `app.js` (dashboard action log) and `project.js` (overview table's
+  created/last-heartbeat fields, heartbeat activity log). Raw ISO timestamp kept in a
+  `title` attribute for hover.
+- Store test coverage extended: default interval, custom interval round-trip, and the
+  5s-minimum clamp.

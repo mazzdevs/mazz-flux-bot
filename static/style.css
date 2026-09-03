@@ -136,6 +136,12 @@ table.kv { width: 100%; font-size: 0.85rem; }
 table.kv th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.35rem 0.8rem 0.35rem 0; white-space: nowrap; vertical-align: top; }
 table.kv td { padding: 0.35rem 0; }
 
+.inline-form { display: flex; align-items: center; gap: 0.4rem; }
+.inline-form input[type="number"] {
+  width: 5.5rem; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 5px; padding: 0.2rem 0.4rem; font-size: 0.85rem; font-family: inherit;
+}
+
 textarea#message-text {
   width: 100%; min-height: 4rem; background: var(--panel); border: 1px solid var(--border); color: var(--text);
   border-radius: 6px; padding: 0.5rem 0.7rem; font-family: inherit; font-size: 0.9rem; resize: vertical;

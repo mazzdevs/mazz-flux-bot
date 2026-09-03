@@ -32,7 +32,56 @@ use crate::models::{CreateInstanceRequest, JobConfig, PidaStatus, Project, Proje
 use crate::vape_client::VapeClient;
 use crate::AppState;
 
-const DEFAULT_INTERVAL_SECS: u64 = 60;
+/// Default per-project heartbeat cadence (see `Project::heartbeat_interval_secs`) —
+/// 15 minutes, editable per project via `PATCH /api/projects/{id}/heartbeat-interval`.
+pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 15 * 60;
+
+/// How often the outer loop wakes up to check which projects are due —
+/// independent of any individual project's own interval. Short on purpose
+/// (project intervals can be much shorter than 15 minutes), overridable via
+/// `HEARTBEAT_SCAN_INTERVAL_SECS` for tests/tuning.
+pub const DEFAULT_SCAN_INTERVAL_SECS: u64 = 15;
+
+/// Tracks the outer scan loop's own cadence (NOT any individual project's
+/// heartbeat interval — see `Project::heartbeat_interval_secs` for that). UI
+/// consumers should compute each project's own next-due time from its
+/// `last_heartbeat_at` + `heartbeat_interval_secs`; this clock is just proof
+/// the scan loop is alive and roughly how fresh its own view is.
+pub struct HeartbeatClock {
+    pub interval_secs: u64,
+    last_tick_at: std::sync::RwLock<chrono::DateTime<chrono::Utc>>,
+}
+
+impl HeartbeatClock {
+    pub fn new(interval_secs: u64) -> Self {
+        Self { interval_secs, last_tick_at: std::sync::RwLock::new(chrono::Utc::now()) }
+    }
+
+    fn mark(&self) {
+        *self.last_tick_at.write().unwrap() = chrono::Utc::now();
+    }
+
+    pub fn status(&self) -> serde_json::Value {
+        let last = *self.last_tick_at.read().unwrap();
+        let next = last + chrono::Duration::seconds(self.interval_secs as i64);
+        serde_json::json!({
+            "scan_interval_secs": self.interval_secs,
+            "last_scan_at": last.to_rfc3339(),
+            "next_scan_at": next.to_rfc3339(),
+        })
+    }
+}
+
+/// True if `project` is due for a heartbeat tick right now: never ticked, or
+/// its own `heartbeat_interval_secs` has elapsed since `last_heartbeat_at`.
+/// An unparseable timestamp is treated as "due" (fail open — better to tick
+/// an extra time than to silently stop ticking a project forever).
+fn is_due(project: &Project) -> bool {
+    let Some(last) = &project.last_heartbeat_at else { return true };
+    let Ok(last) = chrono::DateTime::parse_from_rfc3339(last) else { return true };
+    let elapsed = chrono::Utc::now().signed_duration_since(last.with_timezone(&chrono::Utc));
+    elapsed.num_seconds() >= project.heartbeat_interval_secs as i64
+}
 
 /// The conductor's structured answer for one tick. We ask Anthropic to respond
 /// with exactly this JSON shape; if it doesn't (or the key isn't configured),
@@ -361,12 +410,13 @@ fn build_graph(vape: Arc<VapeClient>, conductor: Arc<Conductor>) -> CompiledGrap
 // ---- Outer polling loop ----------------------------------------------------
 
 pub async fn run(state: AppState) {
-    let interval_secs: u64 = std::env::var("HEARTBEAT_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_INTERVAL_SECS);
-    info!(interval_secs, "heartbeat loop starting");
+    let interval_secs = state.heartbeat_clock.interval_secs;
+    info!(interval_secs, "heartbeat scan loop starting (each project ticks on its own interval, default {}s)", DEFAULT_HEARTBEAT_INTERVAL_SECS);
 
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     loop {
         ticker.tick().await;
+        state.heartbeat_clock.mark();
 
         // Resolved fresh every tick (not cached) so a key saved through the
         // settings UI mid-run takes effect on the very next tick.
@@ -380,9 +430,33 @@ pub async fn run(state: AppState) {
     }
 }
 
+/// Forces one heartbeat tick for a single project right now, bypassing both
+/// the `heartbeat_enabled`/`status == running` filter AND the per-project
+/// `is_due` interval check that the periodic scan loop applies — this is an
+/// explicit "do it now" request (e.g. the project detail page's "Force
+/// heartbeat" button, useful when an instance was stuck `Instance not
+/// ready` and the project's own interval hasn't elapsed yet). Does NOT
+/// reset the scan loop's own `HeartbeatClock` — that's about the scan
+/// loop's cadence, not any individual project's last-processed time. It DOES
+/// update the project's own `last_heartbeat_at` via the normal
+/// `persist_tick` path, which pushes this project's next-due time forward
+/// by its interval, same as an automatic tick would.
+pub async fn force_tick(state: &AppState, project_id: &str) -> anyhow::Result<()> {
+    let project = state.store.get_project(project_id).await?.ok_or_else(|| anyhow::anyhow!("project {project_id} not found"))?;
+
+    let conductor = Arc::new(Conductor::from_sources(&state.store).await);
+    let graph = build_graph(state.vape.clone(), conductor);
+    let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
+
+    process_project(state, &executor, &project).await
+}
+
 async fn tick(state: &AppState, executor: &Executor<HeartbeatState>) -> anyhow::Result<()> {
     let projects = state.store.list_running_projects().await?;
     for project in projects {
+        if !is_due(&project) {
+            continue;
+        }
         if let Err(e) = process_project(state, executor, &project).await {
             error!(project_id = %project.id, error = %e, "failed to process project this tick");
             let _ = state.store.log_action(Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_error", None, None, Some(&e.to_string())).await;
