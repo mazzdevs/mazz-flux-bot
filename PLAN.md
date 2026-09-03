@@ -406,3 +406,28 @@ the vape dashboard under owner `mazzdevs`. Delete it via `cadmium vape delete w6
 (or through mazz-flux-bot itself once the UI's delete action is wired to a project) when
 done looking at it — it is a real running pod and will otherwise sit until the reaper's
 warn→grace window (see vape's own auto-cleanup docs) eventually reaps it.
+
+## Second brain backend: OpenRouter (2026-09-03)
+
+`src/brain.rs` adds `Brain`, an enum dispatching to whichever LLM backend is configured:
+
+- `ANTHROPIC_API_KEY` set → direct Anthropic call (unchanged `anthropic_client.rs`),
+  checked first so existing setups keep working with no config change.
+- else `OPENROUTER_API_KEY` set → OpenRouter's OpenAI-compatible `/chat/completions`
+  (`OpenRouterClient`, also in `brain.rs`), model via `OPENROUTER_MODEL` (default
+  `openai/gpt-5.6-sol` — verified live on OpenRouter's `/api/v1/models` today, not
+  assumed). Any OpenRouter model id works, including routing Anthropic models through
+  OpenRouter instead of direct.
+- neither → `Brain::Disabled`, identical "observe only" behavior as before.
+
+`AppState.anthropic: Arc<AnthropicClient>` was renamed to `AppState.brain: Arc<Brain>`
+(and the same rename through `heartbeat.rs`'s node structs) since the field is no longer
+Anthropic-specific. `parse_brain_response` and the spice tests were untouched — they
+operate on the brain's raw text response regardless of which backend produced it.
+
+Not yet live-fired against OpenRouter (only startup backend-selection was smoke-tested).
+Next step if picking this up: set a real `OPENROUTER_API_KEY`, rerun the same live-spike
+pattern from the earlier section against a throwaway project, and confirm the
+`choices[0].message.content` parse actually matches what `openai/gpt-5.6-sol` returns
+(OpenAI-family models are usually well-behaved chat-completion responders, but this
+hasn't been checked against this specific model).

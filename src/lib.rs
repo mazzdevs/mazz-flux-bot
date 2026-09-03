@@ -1,5 +1,6 @@
 pub mod anthropic_client;
 pub mod api;
+pub mod brain;
 pub mod db;
 pub mod heartbeat;
 pub mod models;
@@ -9,12 +10,12 @@ use std::sync::Arc;
 
 use sqlx::SqlitePool;
 
-use anthropic_client::AnthropicClient;
+use brain::Brain;
 use vape_client::VapeClient;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
     pub vape: Arc<VapeClient>,
-    pub anthropic: Arc<AnthropicClient>,
+    pub brain: Arc<Brain>,
 }

@@ -10,13 +10,13 @@
 //!
 //! `fetch_status` interrupts (metalcraft human-in-the-loop) instead of
 //! continuing to `decide` when the instance has a pending question and no
-//! `ANTHROPIC_API_KEY` is configured to safely answer it — see
-//! `FetchStatusNode`. The graph itself is acyclic; a `StepGuard` is still
-//! wired in as defence-in-depth against a future edit accidentally
-//! introducing a cycle (see `loop_guard`).
+//! brain (`ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`, see `brain.rs`) is
+//! configured to safely answer it — see `FetchStatusNode`. The graph itself
+//! is acyclic; a `StepGuard` is still wired in as defence-in-depth against a
+//! future edit accidentally introducing a cycle (see `loop_guard`).
 //!
 //! DB writes (the durable record of what happened) live in `persist_tick`,
-//! not in the nodes — nodes only touch the vape/anthropic clients and
+//! not in the nodes — nodes only touch the vape client and brain, and
 //! compute state transitions, which keeps the graph itself testable with
 //! `spice_framework` without a database in the loop (see `tests/`).
 
@@ -27,7 +27,7 @@ use metalcraft::*;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-use crate::anthropic_client::AnthropicClient;
+use crate::brain::Brain;
 use crate::db;
 use crate::models::{CreateInstanceRequest, JobConfig, PidaStatus, Project, ProjectStatus};
 use crate::vape_client::VapeClient;
@@ -203,7 +203,7 @@ impl Node<HeartbeatState> for CreateInstanceNode {
 /// safely answer it.
 struct FetchStatusNode {
     vape: Arc<VapeClient>,
-    anthropic: Arc<AnthropicClient>,
+    brain: Arc<Brain>,
 }
 
 #[async_trait::async_trait]
@@ -228,10 +228,10 @@ impl Node<HeartbeatState> for FetchStatusNode {
 
         let update = Update::StatusFetched { harness, pida_status: Some(pida_status), messages: recent_messages };
 
-        if pending && !self.anthropic.enabled() {
+        if pending && !self.brain.enabled() {
             return Ok(NodeOutcome::interrupt_with(
                 update,
-                "pending question on the instance, but ANTHROPIC_API_KEY is not set — nothing will auto-answer it. Answer manually via the UI or set the key.",
+                "pending question on the instance, but no brain is configured (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY) — nothing will auto-answer it. Answer manually via the UI or set a key.",
             ));
         }
         Ok(NodeOutcome::Update(update))
@@ -239,15 +239,15 @@ impl Node<HeartbeatState> for FetchStatusNode {
 }
 
 struct DecideNode {
-    anthropic: Arc<AnthropicClient>,
+    brain: Arc<Brain>,
 }
 
 #[async_trait::async_trait]
 impl Node<HeartbeatState> for DecideNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
-        if !self.anthropic.enabled() {
+        if !self.brain.enabled() {
             return Ok(NodeOutcome::Update(Update::Decided(Decision::wait(
-                "no ANTHROPIC_API_KEY configured — heartbeat is only observing, not acting",
+                "no brain configured (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY) — heartbeat is only observing, not acting",
             ))));
         }
 
@@ -258,11 +258,11 @@ impl Node<HeartbeatState> for DecideNode {
         })
         .to_string();
 
-        let decision = match self.anthropic.decide(SYSTEM_PROMPT, &user).await {
+        let decision = match self.brain.decide(SYSTEM_PROMPT, &user).await {
             Ok(text) => parse_brain_response(&text),
             Err(e) => {
-                warn!(project_id = %state.project_id, error = %e, "anthropic call failed — waiting");
-                Decision::wait(format!("anthropic call failed: {e}"))
+                warn!(project_id = %state.project_id, error = %e, "brain call failed — waiting");
+                Decision::wait(format!("brain call failed: {e}"))
             }
         };
         Ok(NodeOutcome::Update(Update::Decided(decision)))
@@ -312,7 +312,7 @@ fn loop_guard() -> StepGuard<HeartbeatState> {
     })
 }
 
-fn build_graph(vape: Arc<VapeClient>, anthropic: Arc<AnthropicClient>) -> CompiledGraph<HeartbeatState> {
+fn build_graph(vape: Arc<VapeClient>, brain: Arc<Brain>) -> CompiledGraph<HeartbeatState> {
     Graph::<HeartbeatState>::new()
         .add_node("route", RouteNode)
         .add_conditional("route", |s: &HeartbeatState| {
@@ -320,11 +320,11 @@ fn build_graph(vape: Arc<VapeClient>, anthropic: Arc<AnthropicClient>) -> Compil
         })
         .add_node("create_instance", CreateInstanceNode { vape: vape.clone() })
         .add_edge("create_instance", END)
-        .add_node("fetch_status", FetchStatusNode { vape: vape.clone(), anthropic: anthropic.clone() })
+        .add_node("fetch_status", FetchStatusNode { vape: vape.clone(), brain: brain.clone() })
         .add_conditional("fetch_status", |s: &HeartbeatState| {
             if s.harness.as_deref() == Some("pida") { "decide".to_string() } else { END.to_string() }
         })
-        .add_node("decide", DecideNode { anthropic })
+        .add_node("decide", DecideNode { brain })
         .add_edge("decide", "act")
         .add_node("act", ActNode { vape })
         .add_edge("act", END)
@@ -339,7 +339,7 @@ pub async fn run(state: AppState) {
     let interval_secs: u64 = std::env::var("HEARTBEAT_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_INTERVAL_SECS);
     info!(interval_secs, "heartbeat loop starting");
 
-    let graph = build_graph(state.vape.clone(), state.anthropic.clone());
+    let graph = build_graph(state.vape.clone(), state.brain.clone());
     let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
 
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));

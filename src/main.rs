@@ -5,7 +5,7 @@ use axum::Router;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
-use mazz_flux_bot::anthropic_client::AnthropicClient;
+use mazz_flux_bot::brain::Brain;
 use mazz_flux_bot::vape_client::VapeClient;
 use mazz_flux_bot::{api, db, heartbeat, AppState};
 
@@ -19,12 +19,14 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(db_path, "sqlite ready");
 
     let vape = Arc::new(VapeClient::new());
-    let anthropic = Arc::new(AnthropicClient::new());
-    if !anthropic.enabled() {
-        tracing::warn!("ANTHROPIC_API_KEY not set — heartbeat will observe instances but won't make steering decisions");
+    let brain = Arc::new(Brain::from_env());
+    match brain.as_ref() {
+        Brain::Anthropic(_) => tracing::info!("brain: Anthropic"),
+        Brain::OpenRouter(_) => tracing::info!("brain: OpenRouter"),
+        Brain::Disabled => tracing::warn!("no ANTHROPIC_API_KEY or OPENROUTER_API_KEY set — heartbeat will observe instances but won't make steering decisions"),
     }
 
-    let state = AppState { db, vape, anthropic };
+    let state = AppState { db, vape, brain };
 
     tokio::spawn(heartbeat::run(state.clone()));
 
