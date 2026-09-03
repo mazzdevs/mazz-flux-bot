@@ -186,4 +186,15 @@ impl Conductor {
         let user = format!("Project name: {project_name}\nGoal: {goal}");
         self.decide(SYSTEM, &user).await
     }
+
+    /// Best-effort: asks the conductor for a short, human-readable project
+    /// name summarizing `goal`, for when the user leaves the name field
+    /// blank at creation time. Callers must fall back to a placeholder on
+    /// any failure/empty response — see `api::create_project`.
+    pub async fn suggest_project_name(&self, goal: &str) -> Result<String> {
+        const SYSTEM: &str = "Respond with ONLY a short, human-readable project name (3-6 words, \
+            title case, no punctuation besides spaces and hyphens, no quotes) summarizing the \
+            goal below. No prose, no preamble.";
+        self.decide(SYSTEM, goal).await
+    }
 }

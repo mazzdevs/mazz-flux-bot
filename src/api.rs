@@ -7,6 +7,7 @@ use serde_json::json;
 
 use crate::conductor;
 use crate::models::CreateProjectRequest;
+use uuid::Uuid;
 use crate::state_repo;
 use crate::AppState;
 
@@ -36,10 +37,35 @@ pub async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<serd
     Ok(Json(json!({ "projects": projects })))
 }
 
-pub async fn create_project(State(state): State<AppState>, Json(req): Json<CreateProjectRequest>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn create_project(State(state): State<AppState>, Json(mut req): Json<CreateProjectRequest>) -> ApiResult<Json<serde_json::Value>> {
+    let (name, name_source) = match req.name.take().filter(|n| !n.trim().is_empty()) {
+        Some(n) => (n, "user_provided"),
+        None => suggest_project_name(&state, &req.goal).await,
+    };
+    req.name = Some(name);
+
     let project = state.store.create_project(req).await?;
-    state.store.log_action(Some(&project.id), None, "project_created", None, None, None).await?;
+    state
+        .store
+        .log_action(Some(&project.id), None, "project_created", Some(&json!({"name_source": name_source})), None, None)
+        .await?;
     Ok(Json(json!({ "project": project })))
+}
+
+/// Best-effort LLM-suggested project name for when the create-project form's
+/// name field was left blank. Falls back to a short id-based placeholder on
+/// any failure/empty response — never blocks project creation.
+async fn suggest_project_name(state: &AppState, goal: &str) -> (String, &'static str) {
+    let conductor = conductor::Conductor::from_sources(&state.store).await;
+    if conductor.enabled() {
+        if let Ok(text) = conductor.suggest_project_name(goal).await {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return (trimmed.to_string(), "llm_suggested");
+            }
+        }
+    }
+    (format!("project-{}", &Uuid::new_v4().to_string()[..8]), "placeholder_fallback")
 }
 
 pub async fn get_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {

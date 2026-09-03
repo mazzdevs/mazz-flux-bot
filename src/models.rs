@@ -88,7 +88,11 @@ fn default_heartbeat_interval_secs() -> u64 {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateProjectRequest {
-    pub name: String,
+    /// If omitted/empty, a name is generated from `goal` by the conductor
+    /// (falling back to a short id-based placeholder if the conductor is
+    /// disabled or the call fails) — see `api::create_project`.
+    #[serde(default)]
+    pub name: Option<String>,
     pub goal: String,
     #[serde(default)]
     pub heartbeat_prompt: Option<String>,

@@ -10,7 +10,7 @@ async fn store_round_trips_everything() {
     let store = Store::open(&dir).await.expect("open store");
 
     let project = store
-        .create_project(CreateProjectRequest { name: "t".into(), goal: "g".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None })
+        .create_project(CreateProjectRequest { name: Some("t".into()), goal: "g".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None })
         .await
         .expect("create project");
 
@@ -63,7 +63,7 @@ async fn memory_overwrites_not_appends() {
     let store = Store::open(&dir).await.expect("open store");
 
     let project = store
-        .create_project(CreateProjectRequest { name: "t".into(), goal: "g".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None })
+        .create_project(CreateProjectRequest { name: Some("t".into()), goal: "g".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None })
         .await
         .unwrap();
 
@@ -87,7 +87,7 @@ async fn goal_and_heartbeat_prompt_editable() {
     let store = Store::open(&dir).await.expect("open store");
 
     let project = store
-        .create_project(CreateProjectRequest { name: "t".into(), goal: "original goal".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None })
+        .create_project(CreateProjectRequest { name: Some("t".into()), goal: "original goal".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None })
         .await
         .unwrap();
     assert_eq!(project.heartbeat_prompt, None);

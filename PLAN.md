@@ -201,3 +201,34 @@ Landed exactly per the clarified requirements from the Q&A:
   vape instances created during testing \u2014 a benign race between the periodic scan loop
   and a manually forced tick created two instances for one project; pre-existing
   behavior, not caused by this change, and not touched in this pass).
+
+## Executed (2026-09-03) — optional project name (LLM-suggested) + README
+
+- **Project name is now optional at creation.** `CreateProjectRequest.name: Option<String>`
+  (`None`/blank in the create-project dialog). `api::create_project` resolves it before
+  calling the store: user-provided name wins if non-empty; otherwise
+  `Conductor::suggest_project_name(goal)` asks the conductor for a short, human-readable
+  name (3-6 words, title case), with a hard fallback to a short id-based placeholder
+  (`project-{8 hex chars}`) if the conductor is disabled or the call fails/returns empty
+  \u2014 mirrors the existing `suggest_instance_slug`/`compose_initial_prompt` best-effort
+  pattern exactly. Logged as `project_created` with a `name_source`
+  (`user_provided`/`llm_suggested`/`placeholder_fallback`). Verified live: a project
+  created with only a `goal` ("Set up a Redis cache layer...") got named "API Gateway
+  Redis Cache" by the conductor.
+- New tests: `create_project_request_name_is_optional` (serde). 18 tests total, all
+  passing.
+- **README.md** written \u2014 full feature tour, architecture, heartbeat-loop walkthrough,
+  quick start, complete env-var config table, API reference table (the same API a
+  `pida` instance running inside this pod can use to manage its own projects, including
+  creation \u2014 confirmed live in this session), dev/test instructions.
+- **Public-repo safety check performed** before pushing: no secrets/keys anywhere in
+  source or git history (grepped for `sk-ant-`/`sk-or-v1-`/`ghp_`/`gho_`/`AKIA` patterns
+  across full history \u2014 only false positives were placeholder text in an old, since-
+  removed HTML form). `vape.stable.dexus.io` (Dutchie-internal vape-manager hostname)
+  appears in source/README as a default/example value \u2014 not a secret, but is
+  Dutchie-specific and meaningless/unreachable to anyone outside that org. No other
+  internal identifiers (Jira ticket numbers, PR content, employee info) found in
+  the bot's own repo \u2014 all of that lived only in the separate, untracked
+  `mazz-flux-bot-state` sibling directory, confirmed outside this repo's git tree
+  entirely (`git check-ignore` confirms it's not even reachable as a path within the
+  repo). `.gitignore` already excludes `.env`/`.envrc`/`.bolt/`.

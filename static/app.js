@@ -198,7 +198,8 @@ document.getElementById("create-form").addEventListener("submit", async (ev) => 
   const constellation = document.getElementById("constellation").value.trim();
   const goal = document.getElementById("goal").value.trim();
   const heartbeatPrompt = document.getElementById("heartbeat-prompt").value.trim();
-  const body = { name, constellation, goal };
+  const body = { constellation, goal };
+  if (name) body.name = name;
   if (heartbeatPrompt) body.heartbeat_prompt = heartbeatPrompt;
   try {
     await api("/api/projects", { method: "POST", body: JSON.stringify(body) });

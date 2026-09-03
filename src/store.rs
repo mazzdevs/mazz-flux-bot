@@ -164,7 +164,7 @@ impl Store {
         let ts = now();
         let project = Project {
             id: id.clone(),
-            name: req.name,
+            name: req.name.unwrap_or_else(|| format!("project-{}", &id[..8.min(id.len())])),
             goal: req.goal,
             heartbeat_prompt: req.heartbeat_prompt,
             constellation: req.constellation.unwrap_or_else(|| "back-office".to_string()),

@@ -1,7 +1,7 @@
 //! Serialization coverage for request/response shapes that talk to the real
 //! vape API — catches accidental field drops/renames.
 
-use mazz_flux_bot::models::{CreateInstanceRequest, JobConfig, Project};
+use mazz_flux_bot::models::{CreateInstanceRequest, CreateProjectRequest, JobConfig, Project};
 
 #[test]
 fn job_config_model_field_serializes_when_present() {
@@ -24,6 +24,16 @@ fn job_config_model_field_omitted_when_none() {
     let value = serde_json::to_value(&job).unwrap();
     assert!(value.get("model").is_none());
     assert!(value.get("harness").is_none());
+}
+
+/// `name` is optional on create — the create-project dialog leaves it out
+/// entirely when blank so the API can generate one from `goal`.
+#[test]
+fn create_project_request_name_is_optional() {
+    let json = r#"{"goal": "do a thing"}"#;
+    let req: CreateProjectRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(req.name, None);
+    assert_eq!(req.goal, "do a thing");
 }
 
 /// Project JSON files written before `heartbeat_prompt` existed must still
