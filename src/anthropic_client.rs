@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 
-const DEFAULT_MODEL: &str = "claude-sonnet-5";
+pub(crate) const DEFAULT_MODEL: &str = "claude-sonnet-5";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
-/// The "brain" the heartbeat loop consults to decide what to do about a
+/// The "conductor" the heartbeat loop consults to decide what to do about a
 /// project's instance. Standard direct Anthropic API call — no internal
 /// WARP-gated gateway was found (vape's own `internal/llm` package calls
 /// `api.anthropic.com` directly with `ANTHROPIC_API_KEY` too, so this mirrors
@@ -21,6 +21,12 @@ impl AnthropicClient {
         let api_key = std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty());
         let model = std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         Self { http: reqwest::Client::new(), api_key, model }
+    }
+
+    /// For keys/models sourced from the settings DB rather than the process
+    /// environment — see `conductor.rs::Conductor::from_sources`.
+    pub fn with_key(api_key: String, model: Option<String>) -> Self {
+        Self { http: reqwest::Client::new(), api_key: Some(api_key), model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()) }
     }
 
     pub fn enabled(&self) -> bool {

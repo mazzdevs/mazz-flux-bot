@@ -10,13 +10,13 @@
 //!
 //! `fetch_status` interrupts (metalcraft human-in-the-loop) instead of
 //! continuing to `decide` when the instance has a pending question and no
-//! brain (`ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`, see `brain.rs`) is
+//! conductor (`ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`, see `conductor.rs`) is
 //! configured to safely answer it — see `FetchStatusNode`. The graph itself
 //! is acyclic; a `StepGuard` is still wired in as defence-in-depth against a
 //! future edit accidentally introducing a cycle (see `loop_guard`).
 //!
 //! DB writes (the durable record of what happened) live in `persist_tick`,
-//! not in the nodes — nodes only touch the vape client and brain, and
+//! not in the nodes — nodes only touch the vape client and conductor, and
 //! compute state transitions, which keeps the graph itself testable with
 //! `spice_framework` without a database in the loop (see `tests/`).
 
@@ -27,7 +27,7 @@ use metalcraft::*;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-use crate::brain::Brain;
+use crate::conductor::Conductor;
 use crate::db;
 use crate::models::{CreateInstanceRequest, JobConfig, PidaStatus, Project, ProjectStatus};
 use crate::vape_client::VapeClient;
@@ -35,9 +35,9 @@ use crate::AppState;
 
 const DEFAULT_INTERVAL_SECS: u64 = 60;
 
-/// The brain's structured answer for one tick. We ask Anthropic to respond
+/// The conductor's structured answer for one tick. We ask Anthropic to respond
 /// with exactly this JSON shape; if it doesn't (or the key isn't configured),
-/// we fall back to `wait` so a bad/missing brain never takes a destructive
+/// we fall back to `wait` so a bad/missing conductor never takes a destructive
 /// action by accident.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Decision {
@@ -55,20 +55,20 @@ impl Decision {
     }
 }
 
-/// Pure parse of the brain's raw text response into a [`Decision`]. Any
+/// Pure parse of the conductor's raw text response into a [`Decision`]. Any
 /// failure to parse — empty response, markdown-fenced JSON, an action we
 /// don't recognize as non-empty — falls back to `wait`. This is the
-/// safety-critical path (an unparseable brain response must never be treated
+/// safety-critical path (an unparseable conductor response must never be treated
 /// as license to act) and it's exactly what the `spice_framework` behavioral
-/// tests in `tests/heartbeat_brain.rs` exercise directly, with no live LLM
+/// tests in `tests/heartbeat_conductor.rs` exercise directly, with no live LLM
 /// call needed.
 const KNOWN_ACTIONS: [&str; 4] = ["wait", "send_message", "mark_done", "mark_error"];
 
-pub fn parse_brain_response(raw: &str) -> Decision {
+pub fn parse_conductor_response(raw: &str) -> Decision {
     match serde_json::from_str::<Decision>(strip_markdown_fence(raw.trim())) {
         Ok(d) if KNOWN_ACTIONS.contains(&d.action.as_str()) => d,
-        Ok(d) => Decision::wait(format!("brain returned unknown action '{}': {raw}", d.action)),
-        Err(_) => Decision::wait(format!("brain returned unparseable response: {raw}")),
+        Ok(d) => Decision::wait(format!("conductor returned unknown action '{}': {raw}", d.action)),
+        Err(_) => Decision::wait(format!("conductor returned unparseable response: {raw}")),
     }
 }
 
@@ -199,11 +199,11 @@ impl Node<HeartbeatState> for CreateInstanceNode {
 
 /// Fetches unified + pida-specific status and the recent chat transcript.
 /// Interrupts (metalcraft human-in-the-loop) instead of proceeding to
-/// `decide` when there's a pending question and no brain configured to
+/// `decide` when there's a pending question and no conductor configured to
 /// safely answer it.
 struct FetchStatusNode {
     vape: Arc<VapeClient>,
-    brain: Arc<Brain>,
+    conductor: Arc<Conductor>,
 }
 
 #[async_trait::async_trait]
@@ -228,10 +228,10 @@ impl Node<HeartbeatState> for FetchStatusNode {
 
         let update = Update::StatusFetched { harness, pida_status: Some(pida_status), messages: recent_messages };
 
-        if pending && !self.brain.enabled() {
+        if pending && !self.conductor.enabled() {
             return Ok(NodeOutcome::interrupt_with(
                 update,
-                "pending question on the instance, but no brain is configured (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY) — nothing will auto-answer it. Answer manually via the UI or set a key.",
+                "pending question on the instance, but no conductor is configured (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY) — nothing will auto-answer it. Answer manually via the UI or set a key.",
             ));
         }
         Ok(NodeOutcome::Update(update))
@@ -239,15 +239,15 @@ impl Node<HeartbeatState> for FetchStatusNode {
 }
 
 struct DecideNode {
-    brain: Arc<Brain>,
+    conductor: Arc<Conductor>,
 }
 
 #[async_trait::async_trait]
 impl Node<HeartbeatState> for DecideNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
-        if !self.brain.enabled() {
+        if !self.conductor.enabled() {
             return Ok(NodeOutcome::Update(Update::Decided(Decision::wait(
-                "no brain configured (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY) — heartbeat is only observing, not acting",
+                "no conductor configured (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY) — heartbeat is only observing, not acting",
             ))));
         }
 
@@ -258,11 +258,11 @@ impl Node<HeartbeatState> for DecideNode {
         })
         .to_string();
 
-        let decision = match self.brain.decide(SYSTEM_PROMPT, &user).await {
-            Ok(text) => parse_brain_response(&text),
+        let decision = match self.conductor.decide(SYSTEM_PROMPT, &user).await {
+            Ok(text) => parse_conductor_response(&text),
             Err(e) => {
-                warn!(project_id = %state.project_id, error = %e, "brain call failed — waiting");
-                Decision::wait(format!("brain call failed: {e}"))
+                warn!(project_id = %state.project_id, error = %e, "conductor call failed — waiting");
+                Decision::wait(format!("conductor call failed: {e}"))
             }
         };
         Ok(NodeOutcome::Update(Update::Decided(decision)))
@@ -282,7 +282,7 @@ impl Node<HeartbeatState> for ActNode {
             "send_message" => {
                 let message = decision.message.clone().unwrap_or_default();
                 if message.is_empty() {
-                    warn!(project_id = %state.project_id, "brain said send_message with no message body — treating as wait");
+                    warn!(project_id = %state.project_id, "conductor said send_message with no message body — treating as wait");
                     return Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, decision.note.clone())));
                 }
                 let instance_id = state.vape_instance_id.as_deref().ok_or_else(|| GraphError::Node {
@@ -312,7 +312,7 @@ fn loop_guard() -> StepGuard<HeartbeatState> {
     })
 }
 
-fn build_graph(vape: Arc<VapeClient>, brain: Arc<Brain>) -> CompiledGraph<HeartbeatState> {
+fn build_graph(vape: Arc<VapeClient>, conductor: Arc<Conductor>) -> CompiledGraph<HeartbeatState> {
     Graph::<HeartbeatState>::new()
         .add_node("route", RouteNode)
         .add_conditional("route", |s: &HeartbeatState| {
@@ -320,11 +320,11 @@ fn build_graph(vape: Arc<VapeClient>, brain: Arc<Brain>) -> CompiledGraph<Heartb
         })
         .add_node("create_instance", CreateInstanceNode { vape: vape.clone() })
         .add_edge("create_instance", END)
-        .add_node("fetch_status", FetchStatusNode { vape: vape.clone(), brain: brain.clone() })
+        .add_node("fetch_status", FetchStatusNode { vape: vape.clone(), conductor: conductor.clone() })
         .add_conditional("fetch_status", |s: &HeartbeatState| {
             if s.harness.as_deref() == Some("pida") { "decide".to_string() } else { END.to_string() }
         })
-        .add_node("decide", DecideNode { brain })
+        .add_node("decide", DecideNode { conductor })
         .add_edge("decide", "act")
         .add_node("act", ActNode { vape })
         .add_edge("act", END)
@@ -339,12 +339,16 @@ pub async fn run(state: AppState) {
     let interval_secs: u64 = std::env::var("HEARTBEAT_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_INTERVAL_SECS);
     info!(interval_secs, "heartbeat loop starting");
 
-    let graph = build_graph(state.vape.clone(), state.brain.clone());
-    let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
-
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     loop {
         ticker.tick().await;
+
+        // Resolved fresh every tick (not cached) so a key saved through the
+        // settings UI mid-run takes effect on the very next tick.
+        let conductor = Arc::new(Conductor::from_sources(&state.db).await);
+        let graph = build_graph(state.vape.clone(), conductor);
+        let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
+
         if let Err(e) = tick(&state, &executor).await {
             error!(error = %e, "heartbeat tick failed");
         }

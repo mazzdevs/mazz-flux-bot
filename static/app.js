@@ -113,6 +113,71 @@ async function tick() {
   }
 }
 
+// ---- Settings dialog --------------------------------------------------
+
+const settingsDialog = document.getElementById("settings-dialog");
+
+function applySettingsStatus(s) {
+  const activeLabel = { anthropic: "Anthropic", openrouter: "OpenRouter", none: "none (observe-only)" }[s.active_backend] || s.active_backend;
+  document.getElementById("settings-active").textContent = `Active conductor: ${activeLabel}`;
+
+  document.getElementById("anthropic-hint").textContent = s.anthropic_key_set ? `set (${s.anthropic_key_preview})` : "not set";
+  document.getElementById("anthropic-model").placeholder = s.anthropic_model;
+  document.getElementById("openrouter-hint").textContent = s.openrouter_key_set ? `set (${s.openrouter_key_preview})` : "not set";
+  document.getElementById("openrouter-model").placeholder = s.openrouter_model;
+}
+
+async function loadSettings() {
+  try {
+    applySettingsStatus(await api("/api/settings"));
+  } catch (e) {
+    console.warn("failed to load settings", e);
+  }
+}
+
+document.getElementById("settings-toggle").addEventListener("click", async () => {
+  await loadSettings();
+  settingsDialog.showModal();
+});
+document.getElementById("settings-close").addEventListener("click", () => settingsDialog.close());
+
+document.getElementById("settings-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  // Only send fields the user actually typed into — an untouched/blank
+  // field means "leave unchanged", not "clear this key" (see api.rs's
+  // UpdateSettingsRequest doc comment). Model fields are safe to always
+  // send since they aren't secrets.
+  const body = {};
+  const anthropicKey = document.getElementById("anthropic-api-key").value;
+  const openrouterKey = document.getElementById("openrouter-api-key").value;
+  if (anthropicKey) body.anthropic_api_key = anthropicKey;
+  if (openrouterKey) body.openrouter_api_key = openrouterKey;
+  const anthropicModel = document.getElementById("anthropic-model").value.trim();
+  const openrouterModel = document.getElementById("openrouter-model").value.trim();
+  if (anthropicModel) body.anthropic_model = anthropicModel;
+  if (openrouterModel) body.openrouter_model = openrouterModel;
+
+  try {
+    applySettingsStatus(await api("/api/settings", { method: "POST", body: JSON.stringify(body) }));
+    document.getElementById("anthropic-api-key").value = "";
+    document.getElementById("openrouter-api-key").value = "";
+  } catch (e) {
+    alert(e.message);
+  }
+});
+
+document.querySelectorAll("#settings-dialog button[data-clear]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const key = btn.dataset.clear;
+    if (!confirm(`Clear the ${key === "anthropic_api_key" ? "Anthropic" : "OpenRouter"} key?`)) return;
+    try {
+      applySettingsStatus(await api("/api/settings", { method: "POST", body: JSON.stringify({ [key]: "" }) }));
+    } catch (e) {
+      alert(e.message);
+    }
+  });
+});
+
 loadConstellations();
 tick();
 setInterval(tick, 5000);

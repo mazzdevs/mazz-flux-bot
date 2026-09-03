@@ -5,9 +5,18 @@ use axum::Router;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
-use mazz_flux_bot::brain::Brain;
+use mazz_flux_bot::conductor::Conductor;
 use mazz_flux_bot::vape_client::VapeClient;
 use mazz_flux_bot::{api, db, heartbeat, AppState};
+
+async fn log_conductor_status(db: &sqlx::SqlitePool) {
+    let conductor = Conductor::from_sources(db).await;
+    if conductor.enabled() {
+        tracing::info!(backend = conductor.label(), "conductor configured");
+    } else {
+        tracing::warn!("no conductor configured (Settings panel, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY) — heartbeat will observe instances but won't make steering decisions");
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,14 +28,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(db_path, "sqlite ready");
 
     let vape = Arc::new(VapeClient::new());
-    let brain = Arc::new(Brain::from_env());
-    match brain.as_ref() {
-        Brain::Anthropic(_) => tracing::info!("brain: Anthropic"),
-        Brain::OpenRouter(_) => tracing::info!("brain: OpenRouter"),
-        Brain::Disabled => tracing::warn!("no ANTHROPIC_API_KEY or OPENROUTER_API_KEY set — heartbeat will observe instances but won't make steering decisions"),
-    }
+    log_conductor_status(&db).await;
 
-    let state = AppState { db, vape, brain };
+    let state = AppState { db, vape };
 
     tokio::spawn(heartbeat::run(state.clone()));
 
@@ -41,7 +45,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/instances/{id}", get(api::get_instance))
         .route("/api/instances/{id}/status", get(api::get_instance_status))
         .route("/api/instances/{id}/session", get(api::get_instance_session))
-        .route("/api/constellations", get(api::list_constellations));
+        .route("/api/constellations", get(api::list_constellations))
+        .route("/api/settings", get(api::get_settings).post(api::update_settings));
 
     let app = Router::new()
         .merge(api_routes)

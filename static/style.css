@@ -26,6 +26,36 @@ header {
 
 header h1 { margin: 0; font-size: 1.4rem; }
 header .sub { color: var(--muted); margin: 0.25rem 0 0; font-size: 0.85rem; }
+header { position: relative; }
+header #settings-toggle { position: absolute; top: 1.5rem; right: 0; }
+
+dialog#settings-dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  width: 420px;
+}
+dialog#settings-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog#settings-dialog h2 { margin: 0 0 0.25rem; font-size: 1.05rem; }
+dialog#settings-dialog fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 0.9rem 0;
+  padding: 0.6rem 0.8rem 0.8rem;
+}
+dialog#settings-dialog legend { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+dialog#settings-dialog label { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
+dialog#settings-dialog .hint { color: var(--ok); font-style: italic; }
+dialog#settings-dialog input {
+  width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem; margin-top: 0.25rem;
+}
+dialog#settings-dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+dialog#settings-dialog .dialog-actions button[type="submit"] {
+  background: var(--accent); color: white; border: none; border-radius: 6px; padding: 0.4rem 1rem; cursor: pointer;
+}
 
 main { max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 2rem; }
 

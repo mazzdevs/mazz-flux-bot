@@ -5,6 +5,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::conductor;
 use crate::db;
 use crate::models::CreateProjectRequest;
 use crate::AppState;
@@ -70,7 +71,7 @@ pub struct SendMessageRequest {
     pub message: String,
 }
 
-/// Manual override: bypass the brain and send a message straight to the
+/// Manual override: bypass the conductor and send a message straight to the
 /// project's instance. Useful for answering a pending question yourself
 /// without waiting for the next heartbeat, or when ANTHROPIC_API_KEY isn't
 /// configured at all.
@@ -134,4 +135,46 @@ pub async fn get_instance_session(State(state): State<AppState>, Path(id): Path<
 pub async fn list_constellations(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let constellations = state.vape.list_constellations().await?;
     Ok(Json(json!({ "constellations": constellations })))
+}
+
+// ---- Conductor settings -------------------------------------------------------
+//
+// Never echoes a raw secret back to the browser — only whether one is set
+// and a masked last-4 preview. See conductor.rs::settings_status.
+
+pub async fn get_settings(State(state): State<AppState>) -> ApiResult<Json<conductor::SettingsStatus>> {
+    Ok(Json(conductor::settings_status(&state.db).await))
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateSettingsRequest {
+    /// Omitted (not present in the JSON body) means "leave unchanged" —
+    /// that's how the settings form avoids clobbering an already-saved key
+    /// just because its input was left blank in the UI. An explicit empty
+    /// string clears the key (see `db::set_setting`).
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default)]
+    pub anthropic_model: Option<String>,
+    #[serde(default)]
+    pub openrouter_api_key: Option<String>,
+    #[serde(default)]
+    pub openrouter_model: Option<String>,
+}
+
+pub async fn update_settings(State(state): State<AppState>, Json(req): Json<UpdateSettingsRequest>) -> ApiResult<Json<conductor::SettingsStatus>> {
+    if let Some(v) = &req.anthropic_api_key {
+        db::set_setting(&state.db, "anthropic_api_key", v).await?;
+    }
+    if let Some(v) = &req.anthropic_model {
+        db::set_setting(&state.db, "anthropic_model", v).await?;
+    }
+    if let Some(v) = &req.openrouter_api_key {
+        db::set_setting(&state.db, "openrouter_api_key", v).await?;
+    }
+    if let Some(v) = &req.openrouter_model {
+        db::set_setting(&state.db, "openrouter_model", v).await?;
+    }
+    db::log_action(&state.db, None, None, "settings_updated", None, None, None).await?;
+    Ok(Json(conductor::settings_status(&state.db).await))
 }

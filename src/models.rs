@@ -11,9 +11,9 @@ pub enum ProjectStatus {
     Running,
     /// Heartbeat enabled previously, temporarily paused by the user.
     Paused,
-    /// The brain decided the goal is achieved.
+    /// The conductor decided the goal is achieved.
     Done,
-    /// The brain (or vape) hit an unrecoverable error working this project.
+    /// The conductor (or vape) hit an unrecoverable error working this project.
     Error,
 }
 
@@ -65,7 +65,7 @@ pub struct CreateProjectRequest {
 }
 
 /// One row in the action_log table — every mutating call the tool made (or, in
-/// dry-run mode, would have made) plus the brain's reasoning ticks.
+/// dry-run mode, would have made) plus the conductor's reasoning ticks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionLogEntry {
     pub id: i64,

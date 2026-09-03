@@ -9,7 +9,40 @@
   <header>
     <h1>mazz-flux-bot</h1>
     <p class="sub">one pida instance per project, heartbeat-driven</p>
+    <button id="settings-toggle" class="mini" type="button">⚙ Settings</button>
   </header>
+
+  <dialog id="settings-dialog">
+    <form id="settings-form">
+      <h2>Conductor settings</h2>
+      <p class="sub" id="settings-active"></p>
+
+      <fieldset>
+        <legend>Anthropic</legend>
+        <label>API key <span class="hint" id="anthropic-hint"></span></label>
+        <input type="password" id="anthropic-api-key" placeholder="sk-ant-... (leave blank to keep current)" autocomplete="off" />
+        <label>Model</label>
+        <input type="text" id="anthropic-model" placeholder="claude-sonnet-5" />
+        <button type="button" class="mini danger" data-clear="anthropic_api_key">Clear key</button>
+      </fieldset>
+
+      <fieldset>
+        <legend>OpenRouter</legend>
+        <label>API key <span class="hint" id="openrouter-hint"></span></label>
+        <input type="password" id="openrouter-api-key" placeholder="sk-or-... (leave blank to keep current)" autocomplete="off" />
+        <label>Model</label>
+        <input type="text" id="openrouter-model" placeholder="openai/gpt-5.6-sol" />
+        <button type="button" class="mini danger" data-clear="openrouter_api_key">Clear key</button>
+      </fieldset>
+
+      <p class="sub">Anthropic wins if both are set. Keys are stored in the local sqlite DB, never shown here again once saved.</p>
+
+      <div class="dialog-actions">
+        <button type="button" id="settings-close" class="mini">Close</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
 
   <main>
     <section id="create-project">

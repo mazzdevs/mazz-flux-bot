@@ -71,6 +71,21 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    // Key-value store for settings configured via the web UI (conductor API
+    // keys/models today). Secrets live here, not in env vars, once set this
+    // way — see conductor.rs's `from_sources`, which checks this table first and
+    // falls back to env vars only if a key has no row here.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }
 
@@ -254,4 +269,25 @@ pub async fn get_cached_instance_list(pool: &SqlitePool) -> Result<Option<(Strin
         .fetch_optional(pool)
         .await?;
     Ok(row.map(|r| (r.get("raw_json"), r.get("fetched_at"))))
+}
+
+pub async fn get_setting(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
+    let row = sqlx::query("SELECT value FROM settings WHERE key = ?1").bind(key).fetch_optional(pool).await?;
+    Ok(row.map(|r| r.get("value")))
+}
+
+/// An empty value deletes the row (that's how the settings UI "clear this
+/// key" action works) — a stored empty string would otherwise look
+/// indistinguishable from "not set" everywhere else that reads it.
+pub async fn set_setting(pool: &SqlitePool, key: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        sqlx::query("DELETE FROM settings WHERE key = ?1").bind(key).execute(pool).await?;
+    } else {
+        sqlx::query("INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(key)
+            .bind(value)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }

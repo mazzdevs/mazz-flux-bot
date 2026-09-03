@@ -431,3 +431,33 @@ pattern from the earlier section against a throwaway project, and confirm the
 `choices[0].message.content` parse actually matches what `openai/gpt-5.6-sol` returns
 (OpenAI-family models are usually well-behaved chat-completion responders, but this
 hasn't been checked against this specific model).
+
+## Settings UI + rename to "conductor" (2026-09-03)
+
+Two related changes, done together:
+
+1. **API keys are now configurable via the web UI, not just env vars.** New `settings`
+   sqlite table (key/value) + `GET/POST /api/settings`, and a Settings dialog in the
+   frontend (⚙ button, top-right). Precedence per key: DB row (set via UI) → env var →
+   unset. Anthropic wins over OpenRouter if both are configured, same as before.
+   **Resolved fresh every heartbeat tick** (`Conductor::from_sources`, not cached in
+   `AppState`) — a key saved through the UI takes effect on the very next tick, no
+   restart needed. Secrets are never echoed back to the browser once saved; the settings
+   response only carries `*_key_set: bool` + a masked `...abcd`-style last-4 preview. The
+   save form only sends fields the user actually typed into (an untouched/blank input
+   means "leave unchanged"); a dedicated "Clear key" button per field sends an explicit
+   empty string, which `db::set_setting` treats as delete. Live-tested end to end (save,
+   precedence flip, clear) — see the curl sequence in this session's history if resuming
+   with no memory of it.
+2. **Renamed the "brain" concept to "conductor"** per request — `src/brain.rs` →
+   `src/conductor.rs`, `Brain` enum → `Conductor`, `parse_brain_response` →
+   `parse_conductor_response`, test file `tests/heartbeat_brain.rs` →
+   `tests/heartbeat_conductor.rs`, etc. **Naming heads-up for future work in this repo:**
+   `cadmium`/vape already use "conductor" for something unrelated — the `--conductor` flag
+   on `cadmium vape create` and the `vape.io/cadmium-conductor` label cap the number of
+   live instances a given automation identity can hold. Different concept, same word,
+   same general problem space (both are "thing that manages vape instances") — don't
+   confuse the two if grepping across repos.
+
+`AppState` no longer holds a `brain`/`conductor` field at all — it's not a cached value,
+it's resolved on demand (heartbeat ticks, `GET /api/settings`) directly from DB+env.

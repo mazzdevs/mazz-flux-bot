@@ -1,28 +1,28 @@
-//! Behavioral tests for the heartbeat "brain" response parser, using
+//! Behavioral tests for the heartbeat "conductor" response parser, using
 //! `spice_framework` (the real rust4ai test harness — not the unrelated
 //! `spice` crate on crates.io, see PLAN.md).
 //!
-//! `parse_brain_response` is the safety-critical seam: whatever the Anthropic
+//! `parse_conductor_response` is the safety-critical seam: whatever the Anthropic
 //! call returns, this function decides whether it's safe to act on. These
 //! tests exercise it directly with no live LLM call, no network, no API key —
 //! spice's `AgentUnderTest` contract wants a "send a message, get output back"
-//! shape, so `BrainAdapter` below treats the test's `user_message` as the raw
-//! text the brain said, and reports the resulting `Decision` as if `action`
+//! shape, so `ConductorAdapter` below treats the test's `user_message` as the raw
+//! text the conductor said, and reports the resulting `Decision` as if `action`
 //! were a tool call. That's an honest fit: the thing under test really is
 //! "text in, one bounded, validated decision out."
 
 use async_trait::async_trait;
-use mazz_flux_bot::heartbeat::parse_brain_response;
+use mazz_flux_bot::heartbeat::parse_conductor_response;
 use serde_json::json;
 use spice_framework::{test, AgentConfig, AgentOutput, AgentUnderTest, Runner, RunnerConfig, SpiceError, ToolCall, Turn};
 use std::sync::Arc;
 
-struct BrainAdapter;
+struct ConductorAdapter;
 
 #[async_trait]
-impl AgentUnderTest for BrainAdapter {
+impl AgentUnderTest for ConductorAdapter {
     async fn run(&self, user_message: &str, _config: &AgentConfig) -> Result<AgentOutput, SpiceError> {
-        let decision = parse_brain_response(user_message);
+        let decision = parse_conductor_response(user_message);
         let note = decision.note.clone().unwrap_or_default();
         let tool_call = ToolCall {
             id: "1".to_string(),
@@ -49,12 +49,12 @@ impl AgentUnderTest for BrainAdapter {
     }
 
     fn name(&self) -> &str {
-        "heartbeat-brain"
+        "heartbeat-conductor"
     }
 }
 
 #[tokio::test]
-async fn brain_response_parsing_is_safe() {
+async fn conductor_response_parsing_is_safe() {
     let tests = vec![
         // Valid, well-formed responses pass through as-is.
         test("valid-wait", r#"{"action": "wait", "note": "looks fine, waiting"}"#)
@@ -85,7 +85,7 @@ async fn brain_response_parsing_is_safe() {
             .build(),
         // A hallucinated action outside the known set must be neutralized to
         // wait, not passed through — this is the gap the tests caught before
-        // parse_brain_response validated against KNOWN_ACTIONS.
+        // parse_conductor_response validated against KNOWN_ACTIONS.
         test("unknown-action", r#"{"action": "delete_everything", "note": "oops"}"#)
             .name("hallucinated/unknown action")
             .expect_tools(&["wait"])
@@ -105,9 +105,9 @@ async fn brain_response_parsing_is_safe() {
             .build(),
     ];
 
-    let suite = spice_framework::suite("heartbeat brain response parsing", tests);
+    let suite = spice_framework::suite("heartbeat conductor response parsing", tests);
     let runner = Runner::new(RunnerConfig { console_output: false, ..Default::default() });
-    let report = runner.run(suite, Arc::new(BrainAdapter)).await;
+    let report = runner.run(suite, Arc::new(ConductorAdapter)).await;
 
     assert_eq!(
         report.failed, 0,
