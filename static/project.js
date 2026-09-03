@@ -238,6 +238,125 @@ async function loadMemory() {
   }
 }
 
+// ---- Kanban -------------------------------------------------------------
+
+const KANBAN_STATUSES = [
+  ["assigned", "Assigned"],
+  ["in_progress", "In Progress"],
+  ["done", "Done"],
+];
+
+function renderKanbanTask(task) {
+  const options = KANBAN_STATUSES.map(
+    ([value, label]) => `<option value="${value}"${task.status === value ? " selected" : ""}>${label}</option>`
+  ).join("");
+  return `<article class="kanban-task" data-task-id="${escapeHtml(task.id)}">
+    <h4>${escapeHtml(task.title)}</h4>
+    ${task.description ? `<p>${escapeHtml(task.description)}</p>` : ""}
+    <div class="kanban-task-meta" title="${escapeHtml(task.updated_at)}">Updated ${escapeHtml(formatRelative(task.updated_at))}</div>
+    <div class="kanban-task-controls">
+      <label><span class="sr-only">Status for ${escapeHtml(task.title)}</span><select data-kanban-status>${options}</select></label>
+      <div class="btn-group">
+        <button class="btn-icon" type="button" data-kanban-edit title="Edit task" aria-label="Edit ${escapeHtml(task.title)}">
+          <svg class="icon"><use href="/icons.svg#icon-note"></use></svg>
+        </button>
+        <button class="btn-icon kanban-delete" type="button" data-kanban-delete title="Delete task" aria-label="Delete ${escapeHtml(task.title)}">
+          <svg class="icon"><use href="/icons.svg#icon-trash"></use></svg>
+        </button>
+      </div>
+    </div>
+  </article>`;
+}
+
+async function loadKanban() {
+  const { board } = await api(`/api/projects/${projectId}/kanban`);
+  for (const [status] of KANBAN_STATUSES) {
+    const tasks = (board.tasks || []).filter((task) => task.status === status);
+    document.querySelector(`[data-count="${status}"]`).textContent = tasks.length;
+    document.querySelector(`[data-list="${status}"]`).innerHTML = tasks.length
+      ? tasks.map(renderKanbanTask).join("")
+      : `<div class="kanban-empty">No tasks</div>`;
+  }
+}
+
+function setKanbanFormOpen(open) {
+  const form = document.getElementById("kanban-add-form");
+  form.hidden = !open;
+  document.getElementById("kanban-add-toggle").setAttribute("aria-expanded", String(open));
+  if (open) document.getElementById("kanban-title").focus();
+}
+
+document.getElementById("kanban-add-toggle").addEventListener("click", () => {
+  setKanbanFormOpen(document.getElementById("kanban-add-form").hidden);
+});
+document.getElementById("kanban-add-cancel").addEventListener("click", () => setKanbanFormOpen(false));
+
+document.getElementById("kanban-add-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const title = document.getElementById("kanban-title").value.trim();
+  const description = document.getElementById("kanban-description").value.trim();
+  if (!title) return;
+  try {
+    await api(`/api/projects/${projectId}/kanban`, {
+      method: "POST",
+      body: JSON.stringify({ title, description, status: "assigned" }),
+    });
+    ev.currentTarget.reset();
+    setKanbanFormOpen(false);
+    await loadKanban();
+  } catch (e) {
+    document.getElementById("kanban-status").textContent = e.message;
+  }
+});
+
+document.getElementById("kanban-board").addEventListener("change", async (ev) => {
+  const select = ev.target.closest("select[data-kanban-status]");
+  if (!select) return;
+  const card = select.closest("[data-task-id]");
+  select.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/kanban/${encodeURIComponent(card.dataset.taskId)}`, {
+      method: "POST",
+      body: JSON.stringify({ status: select.value }),
+    });
+    await loadKanban();
+  } catch (e) {
+    select.disabled = false;
+    document.getElementById("kanban-status").textContent = e.message;
+  }
+});
+
+document.getElementById("kanban-board").addEventListener("click", async (ev) => {
+  const card = ev.target.closest("[data-task-id]");
+  if (!card) return;
+  const taskId = encodeURIComponent(card.dataset.taskId);
+  if (ev.target.closest("[data-kanban-delete]")) {
+    if (!confirm("Delete this Kanban task?")) return;
+    try {
+      await api(`/api/projects/${projectId}/kanban/${taskId}`, { method: "DELETE" });
+      await loadKanban();
+    } catch (e) {
+      document.getElementById("kanban-status").textContent = e.message;
+    }
+    return;
+  }
+  if (ev.target.closest("[data-kanban-edit]")) {
+    const title = prompt("Task title", card.querySelector("h4").textContent);
+    if (title === null || !title.trim()) return;
+    const description = prompt("Task description", card.querySelector("p")?.textContent || "");
+    if (description === null) return;
+    try {
+      await api(`/api/projects/${projectId}/kanban/${taskId}`, {
+        method: "POST",
+        body: JSON.stringify({ title: title.trim(), description: description.trim() }),
+      });
+      await loadKanban();
+    } catch (e) {
+      document.getElementById("kanban-status").textContent = e.message;
+    }
+  }
+});
+
 async function loadLog() {
   const { entries } = await api(`/api/log?project_id=${projectId}&limit=100`);
   const list = document.getElementById("p-log");
@@ -347,7 +466,7 @@ async function tick() {
   try {
     const p = await loadProject();
     renderCountdown();
-    await Promise.all([loadInstanceStatus(p), loadInstanceLinks(p), loadHumanTasks(), loadNotes(), loadMemory(), loadLog()]);
+    await Promise.all([loadInstanceStatus(p), loadInstanceLinks(p), loadHumanTasks(), loadNotes(), loadMemory(), loadKanban(), loadLog()]);
   } catch (e) {
     console.error(e);
   }

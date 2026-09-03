@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use crate::conductor::Conductor;
-use crate::models::{CreateInstanceRequest, JobConfig, PidaStatus, Project, ProjectStatus};
+use crate::models::{CreateInstanceRequest, JobConfig, KanbanStatus, PidaStatus, Project, ProjectStatus};
 use crate::vape_client::VapeClient;
 use crate::AppState;
 
@@ -87,6 +87,30 @@ fn is_due(project: &Project) -> bool {
 /// with exactly this JSON shape; if it doesn't (or the key isn't configured),
 /// we fall back to `wait` so a bad/missing conductor never takes a destructive
 /// action by accident.
+/// Board mutations are a side channel on a conductor decision, so a single
+/// heartbeat can move a task to In Progress and send the assignment message
+/// to pida atomically from the orchestrator's point of view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum KanbanAction {
+    CreateTask {
+        title: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        status: Option<KanbanStatus>,
+    },
+    UpdateTask {
+        task_id: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        status: Option<KanbanStatus>,
+    },
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Decision {
     #[serde(default)]
@@ -123,11 +147,24 @@ pub struct Decision {
     /// file untouched (e.g. a conductor that doesn't support this field yet).
     #[serde(default)]
     pub memory: Option<String>,
+    /// Zero or more mutations to apply alongside the primary action. This is
+    /// intentionally not the primary `action`: assigning work requires both
+    /// an `update_task` mutation and a composed `send_message` in one tick.
+    #[serde(default)]
+    pub kanban_actions: Vec<KanbanAction>,
 }
 
 impl Decision {
     fn wait(note: impl Into<String>) -> Self {
-        Decision { action: "wait".to_string(), message: None, tasks: None, note: Some(note.into()), add_note: None, memory: None }
+        Decision {
+            action: "wait".to_string(),
+            message: None,
+            tasks: None,
+            note: Some(note.into()),
+            add_note: None,
+            memory: None,
+            kanban_actions: Vec::new(),
+        }
     }
 }
 
@@ -138,12 +175,21 @@ impl Decision {
 /// as license to act) and it's exactly what the `spice_framework` behavioral
 /// tests in `tests/heartbeat_conductor.rs` exercise directly, with no live LLM
 /// call needed.
-const KNOWN_ACTIONS: [&str; 5] = ["wait", "send_message", "mark_done", "mark_error", "create_human_task"];
+const KNOWN_ACTIONS: [&str; 5] = [
+    "wait",
+    "send_message",
+    "mark_done",
+    "mark_error",
+    "create_human_task",
+];
 
 pub fn parse_conductor_response(raw: &str) -> Decision {
     match serde_json::from_str::<Decision>(strip_markdown_fence(raw.trim())) {
         Ok(d) if KNOWN_ACTIONS.contains(&d.action.as_str()) => d,
-        Ok(d) => Decision::wait(format!("conductor returned unknown action '{}': {raw}", d.action)),
+        Ok(d) => Decision::wait(format!(
+            "conductor returned unknown action '{}': {raw}",
+            d.action
+        )),
         Err(_) => Decision::wait(format!("conductor returned unparseable response: {raw}")),
     }
 }
@@ -153,7 +199,9 @@ pub fn parse_conductor_response(raw: &str) -> Decision {
 /// insurance against an otherwise-valid JSON response being rejected for
 /// nothing more than whitespace and three backticks.
 fn strip_markdown_fence(s: &str) -> &str {
-    let Some(rest) = s.strip_prefix("```") else { return s };
+    let Some(rest) = s.strip_prefix("```") else {
+        return s;
+    };
     let rest = rest.strip_prefix("json").unwrap_or(rest);
     let rest = rest.trim_start_matches(['\n', '\r']);
     rest.strip_suffix("```").unwrap_or(rest).trim()
@@ -163,8 +211,9 @@ const SYSTEM_PROMPT: &str = "You are an autonomous orchestrator managing a singl
     instance on behalf of a developer, working toward one stated goal. Each tick you see the \
     project's overall `goal` (always keep this in mind), an optional `heartbeat_prompt` (guidance \
     for what THIS check-in specifically should focus on, if set), your own `memory` from the \
-    previous tick (a compacted summary you wrote — empty on the first tick), and the instance's \
-    current status and most recent chat turns. Respond with ONLY a JSON object (no markdown \
+    previous tick (a compacted summary you wrote — empty on the first tick), the project's full \
+    `kanban` board (stable task IDs, descriptions, and statuses), and the instance's current \
+    status and most recent chat turns. Respond with ONLY a JSON object (no markdown \
     fences, no prose) of the shape: \
     {\"action\": \"wait\" | \"send_message\" | \"mark_done\" | \"mark_error\" | \"create_human_task\", \
     \"message\": \"<only for send_message, or create_human_task with exactly ONE blocker — for \
@@ -181,7 +230,9 @@ const SYSTEM_PROMPT: &str = "You are an autonomous orchestrator managing a singl
     remembering about this project's progress, decisions, and state — include this on every \
     response. This REPLACES your previous memory entirely, so carry forward anything still \
     relevant rather than assuming it persists on its own. Keep it concise — this is what lets \
-    you avoid re-reading full history every tick.>\"}. \
+    you avoid re-reading full history every tick.>\", \
+    \"kanban_actions\": [{\"action\":\"create_task\",\"title\":\"<title>\",\"description\":\"<actionable details>\",\"status\":\"assigned\"} \
+    OR {\"action\":\"update_task\",\"task_id\":\"<stable id from kanban>\",\"title\":\"<optional>\",\"description\":\"<optional>\",\"status\":\"assigned\"|\"in_progress\"|\"done\"}]}. \
     Use send_message to steer the agent or answer a pending question in prose. Use mark_done \
     only when the transcript clearly shows the goal is achieved. Use mark_error only when the \
     agent is stuck in a way a message can't fix. Use create_human_task when you hit a blocker \
@@ -201,7 +252,13 @@ const SYSTEM_PROMPT: &str = "You are an autonomous orchestrator managing a singl
     instance explicitly which archetype to use — name it and summarize its description/preferred \
     model so pida has enough to act on without needing to look it up itself. If no archetype \
     fits well, proceed without recommending one rather than forcing a bad match. \
-    Prefer wait when unsure.";
+    Use `kanban_actions` as a side channel alongside any primary action. When assigning an \
+    Assigned task, emit `action: send_message` with a composed, actionable message naming the \
+    task and best-fitting archetype, AND emit an `update_task` for that exact task ID with \
+    `status: in_progress` in the same response. On a later heartbeat, only move it to `done` \
+    when recent pida progress clearly shows that task is complete. Never invent a task ID; use \
+    the stable ID in `kanban`. You may create new board work with `create_task`. An empty \
+    `kanban_actions` array means no board change. Prefer wait when unsure.";
 
 #[derive(Debug, Clone)]
 pub(crate) enum TickOutcome {
@@ -241,14 +298,25 @@ pub(crate) struct HeartbeatState {
     /// `persist_tick` can tell "no update this tick" (`None`) apart from
     /// "explicitly cleared" if that's ever needed.
     new_memory: Option<String>,
+    kanban_actions: Vec<KanbanAction>,
 }
 
 pub(crate) enum Update {
     Noop,
     InstanceCreated(String),
-    StatusFetched { harness: String, pida_status: Option<PidaStatus>, messages: Vec<serde_json::Value> },
+    StatusFetched {
+        harness: String,
+        pida_status: Option<PidaStatus>,
+        messages: Vec<serde_json::Value>,
+    },
     Decided(Decision),
-    ActionTaken(TickOutcome, Option<String>, Option<String>, Option<String>),
+    ActionTaken(
+        TickOutcome,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Vec<KanbanAction>,
+    ),
     Noted(String),
 }
 
@@ -258,17 +326,22 @@ impl Reducer for HeartbeatState {
         match update {
             Update::Noop => {}
             Update::InstanceCreated(id) => self.vape_instance_id = Some(id),
-            Update::StatusFetched { harness, pida_status, messages } => {
+            Update::StatusFetched {
+                harness,
+                pida_status,
+                messages,
+            } => {
                 self.harness = Some(harness);
                 self.pida_status = pida_status;
                 self.recent_messages = messages;
             }
             Update::Decided(d) => self.decision = Some(d),
-            Update::ActionTaken(outcome, note, add_note, new_memory) => {
+            Update::ActionTaken(outcome, note, add_note, new_memory, kanban_actions) => {
                 self.outcome = Some(outcome);
                 self.note = note;
                 self.add_note = add_note;
                 self.new_memory = new_memory;
+                self.kanban_actions = kanban_actions;
             }
             Update::Noted(note) => self.note = Some(note),
         }
@@ -356,9 +429,18 @@ async fn try_llm_slug(conductor: &Conductor, project_name: &str, goal: &str) -> 
 /// its own words (see `Conductor::compose_initial_prompt`). Falls back to
 /// sending `goal` verbatim on any failure/empty response — must never block
 /// instance creation. Returns `(prompt, source)` for logging.
-async fn compose_initial_prompt(conductor: &Conductor, project_name: &str, goal: &str, archetypes_json: Option<&str>) -> (String, &'static str) {
+async fn compose_initial_prompt(
+    conductor: &Conductor,
+    project_name: &str,
+    goal: &str,
+    archetypes_json: Option<&str>,
+    kanban_json: Option<&str>,
+) -> (String, &'static str) {
     if conductor.enabled() {
-        if let Ok(text) = conductor.compose_initial_prompt(project_name, goal, archetypes_json).await {
+        if let Ok(text) = conductor
+            .compose_initial_prompt(project_name, goal, archetypes_json, kanban_json)
+            .await
+        {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 return (trimmed.to_string(), "llm_composed");
@@ -371,46 +453,105 @@ async fn compose_initial_prompt(conductor: &Conductor, project_name: &str, goal:
 #[async_trait::async_trait]
 impl Node<HeartbeatState> for CreateInstanceNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
-        let (name, naming_source) = match try_llm_slug(&self.conductor, &state.project_name, &state.goal).await {
-            Some(slug) => (format!("{slug}-{}", &state.project_id[..6.min(state.project_id.len())]), "llm_slug"),
-            None => (instance_name(&state.project_name, &state.project_id), "deterministic_slug"),
-        };
+        let (name, naming_source) =
+            match try_llm_slug(&self.conductor, &state.project_name, &state.goal).await {
+                Some(slug) => (
+                    format!(
+                        "{slug}-{}",
+                        &state.project_id[..6.min(state.project_id.len())]
+                    ),
+                    "llm_slug",
+                ),
+                None => (
+                    instance_name(&state.project_name, &state.project_id),
+                    "deterministic_slug",
+                ),
+            };
 
-        let model = crate::conductor::resolve_model(&self.store, "instance_model", "MAZZ_FLUX_INSTANCE_MODEL", crate::conductor::DEFAULT_MODEL).await;
+        let model = crate::conductor::resolve_model(
+            &self.store,
+            "instance_model",
+            "MAZZ_FLUX_INSTANCE_MODEL",
+            crate::conductor::DEFAULT_MODEL,
+        )
+        .await;
         let archetypes = self.store.list_archetypes().await.unwrap_or_default();
         let archetypes_json = serde_json::to_string(&archetypes).ok();
-        let (prompt, prompt_source) = compose_initial_prompt(&self.conductor, &state.project_name, &state.goal, archetypes_json.as_deref()).await;
+        let kanban = self
+            .store
+            .get_kanban_board(&state.project_id)
+            .await
+            .unwrap_or_else(|_| crate::models::KanbanBoard {
+                project_id: state.project_id.clone(),
+                tasks: Vec::new(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            });
+        let kanban_json = serde_json::to_string(&kanban).ok();
+        let (prompt, prompt_source) = compose_initial_prompt(
+            &self.conductor,
+            &state.project_name,
+            &state.goal,
+            archetypes_json.as_deref(),
+            kanban_json.as_deref(),
+        )
+        .await;
 
         let req = CreateInstanceRequest {
             name,
             constellation: state.constellation.clone(),
             subdomain: None,
             ticket: None,
-            job: Some(JobConfig { prompt, harness: Some("pida".to_string()), model: Some(model) }),
+            job: Some(JobConfig {
+                prompt,
+                harness: Some("pida".to_string()),
+                model: Some(model),
+            }),
             labels: std::collections::HashMap::from([("worker".to_string(), "true".to_string())]),
         };
 
-        let resp = self.vape.create_instance(&req).await.map_err(node_err("create_instance"))?;
+        let resp = self
+            .vape
+            .create_instance(&req)
+            .await
+            .map_err(node_err("create_instance"))?;
 
         let _ = self
             .store
-            .log_action(Some(&state.project_id), None, "instance_name_chosen", Some(&serde_json::json!({"name": req.name, "source": naming_source})), None, None)
+            .log_action(
+                Some(&state.project_id),
+                None,
+                "instance_name_chosen",
+                Some(&serde_json::json!({"name": req.name, "source": naming_source})),
+                None,
+                None,
+            )
             .await;
         let _ = self
             .store
-            .log_action(Some(&state.project_id), None, "instance_prompt_composed", Some(&serde_json::json!({"source": prompt_source})), None, None)
+            .log_action(
+                Some(&state.project_id),
+                None,
+                "instance_prompt_composed",
+                Some(&serde_json::json!({"source": prompt_source})),
+                None,
+                None,
+            )
             .await;
 
         if resp.get("dry_run").is_some() {
             return Ok(NodeOutcome::Update(Update::Noted(
-                "dry-run: would create instance (set MAZZ_FLUX_LIVE=0 to force dry-run)".to_string(),
+                "dry-run: would create instance (set MAZZ_FLUX_LIVE=0 to force dry-run)"
+                    .to_string(),
             )));
         }
 
-        let id = resp.get("id").and_then(|v| v.as_str()).ok_or_else(|| GraphError::Node {
-            node: "create_instance".to_string(),
-            message: format!("create_instance response had no id: {resp}"),
-        })?;
+        let id = resp
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| GraphError::Node {
+                node: "create_instance".to_string(),
+                message: format!("create_instance response had no id: {resp}"),
+            })?;
         Ok(NodeOutcome::Update(Update::InstanceCreated(id.to_string())))
     }
 }
@@ -480,14 +621,27 @@ impl Node<HeartbeatState> for DecideNode {
             _ => SYSTEM_PROMPT.to_string(),
         };
 
-        let memory = self.store.read_memory(&state.project_id).await.unwrap_or(None);
+        let memory = self
+            .store
+            .read_memory(&state.project_id)
+            .await
+            .unwrap_or(None);
         let archetypes = self.store.list_archetypes().await.unwrap_or_default();
+        let kanban = self.store.get_kanban_board(&state.project_id).await.unwrap_or_else(|error| {
+            warn!(project_id = %state.project_id, %error, "failed to read kanban board for conductor");
+            crate::models::KanbanBoard {
+                project_id: state.project_id.clone(),
+                tasks: Vec::new(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            }
+        });
 
         let user = serde_json::json!({
             "goal": state.goal,
             "heartbeat_prompt": state.heartbeat_prompt,
             "memory": memory,
             "archetypes": archetypes,
+            "kanban": kanban,
             "pida_status": state.pida_status,
             "recent_messages": state.recent_messages,
         })
@@ -511,28 +665,63 @@ struct ActNode {
 #[async_trait::async_trait]
 impl Node<HeartbeatState> for ActNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
-        let decision = state.decision.clone().unwrap_or_else(|| Decision::wait("act reached with no decision"));
+        let decision = state
+            .decision
+            .clone()
+            .unwrap_or_else(|| Decision::wait("act reached with no decision"));
 
         let note = decision.note.clone();
         let add_note = decision.add_note.clone();
         let new_memory = decision.memory.clone();
+        let kanban_actions = decision.kanban_actions.clone();
 
         match decision.action.as_str() {
             "send_message" => {
                 let message = decision.message.clone().unwrap_or_default();
                 if message.is_empty() {
                     warn!(project_id = %state.project_id, "conductor said send_message with no message body — treating as wait");
-                    return Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, note, add_note, new_memory.clone())));
+                    return Ok(NodeOutcome::Update(Update::ActionTaken(
+                        TickOutcome::Waited,
+                        note,
+                        add_note,
+                        new_memory.clone(),
+                        kanban_actions,
+                    )));
                 }
-                let instance_id = state.vape_instance_id.as_deref().ok_or_else(|| GraphError::Node {
-                    node: "act".to_string(),
-                    message: "send_message with no instance id".to_string(),
-                })?;
-                self.vape.pida_send(instance_id, &message).await.map_err(node_err("act"))?;
-                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Sent(message), note, add_note, new_memory.clone())))
+                let instance_id =
+                    state
+                        .vape_instance_id
+                        .as_deref()
+                        .ok_or_else(|| GraphError::Node {
+                            node: "act".to_string(),
+                            message: "send_message with no instance id".to_string(),
+                        })?;
+                self.vape
+                    .pida_send(instance_id, &message)
+                    .await
+                    .map_err(node_err("act"))?;
+                Ok(NodeOutcome::Update(Update::ActionTaken(
+                    TickOutcome::Sent(message),
+                    note,
+                    add_note,
+                    new_memory.clone(),
+                    kanban_actions,
+                )))
             }
-            "mark_done" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Done, note, add_note, new_memory.clone()))),
-            "mark_error" => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Error, note, add_note, new_memory.clone()))),
+            "mark_done" => Ok(NodeOutcome::Update(Update::ActionTaken(
+                TickOutcome::Done,
+                note,
+                add_note,
+                new_memory.clone(),
+                kanban_actions,
+            ))),
+            "mark_error" => Ok(NodeOutcome::Update(Update::ActionTaken(
+                TickOutcome::Error,
+                note,
+                add_note,
+                new_memory.clone(),
+                kanban_actions,
+            ))),
             "create_human_task" => {
                 // Prefer `tasks` (one or more discrete blockers) over the
                 // legacy single-`message` shape — lets the conductor split a
@@ -540,12 +729,31 @@ impl Node<HeartbeatState> for ActNode {
                 // instance) into separate, independently-resolvable
                 // HumanTask rows instead of one monolithic paragraph.
                 let descriptions: Vec<String> = match &decision.tasks {
-                    Some(tasks) if !tasks.is_empty() => tasks.iter().filter(|t| !t.trim().is_empty()).cloned().collect(),
-                    _ => vec![decision.message.clone().unwrap_or_else(|| note.clone().unwrap_or_else(|| "conductor requested human intervention".to_string()))],
+                    Some(tasks) if !tasks.is_empty() => tasks
+                        .iter()
+                        .filter(|t| !t.trim().is_empty())
+                        .cloned()
+                        .collect(),
+                    _ => vec![decision.message.clone().unwrap_or_else(|| {
+                        note.clone()
+                            .unwrap_or_else(|| "conductor requested human intervention".to_string())
+                    })],
                 };
-                Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Blocked(descriptions), note, add_note, new_memory.clone())))
+                Ok(NodeOutcome::Update(Update::ActionTaken(
+                    TickOutcome::Blocked(descriptions),
+                    note,
+                    add_note,
+                    new_memory.clone(),
+                    kanban_actions,
+                )))
             }
-            _ => Ok(NodeOutcome::Update(Update::ActionTaken(TickOutcome::Waited, note, add_note, new_memory.clone()))),
+            _ => Ok(NodeOutcome::Update(Update::ActionTaken(
+                TickOutcome::Waited,
+                note,
+                add_note,
+                new_memory.clone(),
+                kanban_actions,
+            ))),
         }
     }
 }
@@ -640,7 +848,11 @@ async fn tick(state: &AppState, executor: &Executor<HeartbeatState>) -> anyhow::
     Ok(())
 }
 
-async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, project: &Project) -> anyhow::Result<()> {
+async fn process_project(
+    state: &AppState,
+    executor: &Executor<HeartbeatState>,
+    project: &Project,
+) -> anyhow::Result<()> {
     let initial = HeartbeatState {
         project_id: project.id.clone(),
         project_name: project.name.clone(),
@@ -656,57 +868,248 @@ async fn process_project(state: &AppState, executor: &Executor<HeartbeatState>, 
         note: None,
         add_note: None,
         new_memory: None,
+        kanban_actions: Vec::new(),
     };
 
     match executor.run(initial, &project.id).await? {
-        RunOutcome::Completed(final_state) => persist_tick(state, project, &final_state, None).await,
-        RunOutcome::Interrupted { state: final_state, reason, .. } => persist_tick(state, project, &final_state, Some(reason)).await,
-        RunOutcome::Failed { state: final_state, node, error } => {
+        RunOutcome::Completed(final_state) => {
+            persist_tick(state, project, &final_state, None).await
+        }
+        RunOutcome::Interrupted {
+            state: final_state,
+            reason,
+            ..
+        } => persist_tick(state, project, &final_state, Some(reason)).await,
+        RunOutcome::Failed {
+            state: final_state,
+            node,
+            error,
+        } => {
             warn!(project_id = %project.id, %node, %error, "heartbeat graph node failed");
-            state.store.log_action(Some(&project.id), final_state.vape_instance_id.as_deref(), "heartbeat_node_failed", None, None, Some(&format!("{node}: {error}"))).await?;
-            state.store.touch_heartbeat(&project.id, Some(&format!("node '{node}' failed: {error}"))).await?;
+            state
+                .store
+                .log_action(
+                    Some(&project.id),
+                    final_state.vape_instance_id.as_deref(),
+                    "heartbeat_node_failed",
+                    None,
+                    None,
+                    Some(&format!("{node}: {error}")),
+                )
+                .await?;
+            state
+                .store
+                .touch_heartbeat(&project.id, Some(&format!("node '{node}' failed: {error}")))
+                .await?;
             Ok(())
         }
     }
 }
 
-/// Translates one graph run's final state into the durable sqlite record —
-/// the only place heartbeat.rs talks to the database.
-async fn persist_tick(state: &AppState, project: &Project, final_state: &HeartbeatState, interrupt_reason: Option<String>) -> anyhow::Result<()> {
+/// Applies conductor-requested board changes in order. Unknown task IDs are
+/// logged and skipped rather than failing the heartbeat or rewriting the board.
+/// Other storage errors still fail the tick so they are visible and retried.
+pub async fn apply_kanban_actions(
+    store: &crate::store::Store,
+    project_id: &str,
+    instance_id: Option<&str>,
+    actions: &[KanbanAction],
+) -> anyhow::Result<()> {
+    for action in actions {
+        match action {
+            KanbanAction::CreateTask {
+                title,
+                description,
+                status,
+            } => {
+                if title.trim().is_empty() {
+                    store
+                        .log_action(
+                            Some(project_id),
+                            instance_id,
+                            "kanban_action_rejected",
+                            Some(&serde_json::json!({"action": "create_task"})),
+                            None,
+                            Some("task title is required"),
+                        )
+                        .await?;
+                    continue;
+                }
+                let task = store
+                    .create_kanban_task(
+                        project_id,
+                        title,
+                        description,
+                        status.unwrap_or(KanbanStatus::Assigned),
+                    )
+                    .await?;
+                store
+                    .log_action(
+                        Some(project_id),
+                        instance_id,
+                        "kanban_task_created_by_conductor",
+                        Some(&serde_json::json!({"task_id": task.id, "status": task.status})),
+                        None,
+                        None,
+                    )
+                    .await?;
+            }
+            KanbanAction::UpdateTask {
+                task_id,
+                title,
+                description,
+                status,
+            } => {
+                let updated = store
+                    .update_kanban_task(
+                        project_id,
+                        task_id,
+                        title.as_deref(),
+                        description.as_deref(),
+                        *status,
+                    )
+                    .await?;
+                match updated {
+                    Some(task) => {
+                        store
+                            .log_action(
+                                Some(project_id),
+                                instance_id,
+                                "kanban_task_updated_by_conductor",
+                                Some(
+                                    &serde_json::json!({"task_id": task.id, "status": task.status}),
+                                ),
+                                None,
+                                None,
+                            )
+                            .await?;
+                    }
+                    None => {
+                        store
+                            .log_action(
+                                Some(project_id),
+                                instance_id,
+                                "kanban_action_rejected",
+                                Some(&serde_json::json!({"action": "update_task", "task_id": task_id})),
+                                None,
+                                Some("kanban task not found"),
+                            )
+                            .await?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Translates one graph run's final state into the durable file store.
+async fn persist_tick(
+    state: &AppState,
+    project: &Project,
+    final_state: &HeartbeatState,
+    interrupt_reason: Option<String>,
+) -> anyhow::Result<()> {
     if project.vape_instance_id.is_none() {
         if let Some(id) = &final_state.vape_instance_id {
             state.store.set_project_instance(&project.id, id).await?;
-            state.store.log_action(Some(&project.id), Some(id), "create_instance", None, Some(id), None).await?;
-            state.store.touch_heartbeat(&project.id, Some("instance created")).await?;
+            state
+                .store
+                .log_action(
+                    Some(&project.id),
+                    Some(id),
+                    "create_instance",
+                    None,
+                    Some(id),
+                    None,
+                )
+                .await?;
+            state
+                .store
+                .touch_heartbeat(&project.id, Some("instance created"))
+                .await?;
         } else {
-            let note = final_state.note.clone().unwrap_or_else(|| "create_instance did not return an id".to_string());
-            state.store.log_action(Some(&project.id), None, "create_instance_dry_run", None, Some(&note), None).await?;
-            state.store.touch_heartbeat(&project.id, Some(&note)).await?;
+            let note = final_state
+                .note
+                .clone()
+                .unwrap_or_else(|| "create_instance did not return an id".to_string());
+            state
+                .store
+                .log_action(
+                    Some(&project.id),
+                    None,
+                    "create_instance_dry_run",
+                    None,
+                    Some(&note),
+                    None,
+                )
+                .await?;
+            state
+                .store
+                .touch_heartbeat(&project.id, Some(&note))
+                .await?;
         }
         return Ok(());
     }
 
     if let Some(reason) = interrupt_reason {
-        state.store.log_action(Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_interrupted", None, Some(&reason), None).await?;
-        state.store.touch_heartbeat(&project.id, Some(&reason)).await?;
+        state
+            .store
+            .log_action(
+                Some(&project.id),
+                project.vape_instance_id.as_deref(),
+                "heartbeat_interrupted",
+                None,
+                Some(&reason),
+                None,
+            )
+            .await?;
+        state
+            .store
+            .touch_heartbeat(&project.id, Some(&reason))
+            .await?;
         return Ok(());
     }
 
     if let Some(h) = &final_state.harness {
         if h != "pida" {
             warn!(project_id = %project.id, harness = %h, "instance is not running the pida harness — mazz-flux-bot only drives pida instances for now");
-            state.store.touch_heartbeat(&project.id, Some(&format!("skipped: instance harness is '{h}', not 'pida'"))).await?;
+            state
+                .store
+                .touch_heartbeat(
+                    &project.id,
+                    Some(&format!("skipped: instance harness is '{h}', not 'pida'")),
+                )
+                .await?;
             return Ok(());
         }
     }
 
     let instance_id = project.vape_instance_id.as_deref();
 
+    apply_kanban_actions(
+        &state.store,
+        &project.id,
+        instance_id,
+        &final_state.kanban_actions,
+    )
+    .await?;
+
     // Persisted regardless of which action was taken — see Decision::add_note.
     if let Some(note_md) = &final_state.add_note {
         if !note_md.is_empty() {
             state.store.add_project_note(&project.id, note_md).await?;
-            state.store.log_action(Some(&project.id), instance_id, "add_note", None, Some(&format!("{} chars", note_md.len())), None).await?;
+            state
+                .store
+                .log_action(
+                    Some(&project.id),
+                    instance_id,
+                    "add_note",
+                    None,
+                    Some(&format!("{} chars", note_md.len())),
+                    None,
+                )
+                .await?;
         }
     }
 
@@ -716,35 +1119,124 @@ async fn persist_tick(state: &AppState, project: &Project, final_state: &Heartbe
     if let Some(memory_md) = &final_state.new_memory {
         if !memory_md.is_empty() {
             state.store.write_memory(&project.id, memory_md).await?;
-            state.store.log_action(Some(&project.id), instance_id, "memory_updated", None, Some(&format!("{} chars", memory_md.len())), None).await?;
+            state
+                .store
+                .log_action(
+                    Some(&project.id),
+                    instance_id,
+                    "memory_updated",
+                    None,
+                    Some(&format!("{} chars", memory_md.len())),
+                    None,
+                )
+                .await?;
         }
     }
 
     match &final_state.outcome {
         Some(TickOutcome::Sent(msg)) => {
-            state.store.log_action(Some(&project.id), instance_id, "pida_send", Some(&serde_json::json!({"message": msg})), final_state.note.as_deref(), None).await?;
-            state.store.touch_heartbeat(&project.id, Some(&format!("sent: {msg}"))).await?;
+            state
+                .store
+                .log_action(
+                    Some(&project.id),
+                    instance_id,
+                    "pida_send",
+                    Some(&serde_json::json!({"message": msg})),
+                    final_state.note.as_deref(),
+                    None,
+                )
+                .await?;
+            state
+                .store
+                .touch_heartbeat(&project.id, Some(&format!("sent: {msg}")))
+                .await?;
         }
         Some(TickOutcome::Done) => {
-            state.store.set_project_status(&project.id, ProjectStatus::Done, final_state.note.as_deref()).await?;
-            state.store.set_heartbeat_enabled(&project.id, false).await?;
-            state.store.log_action(Some(&project.id), instance_id, "mark_done", None, final_state.note.as_deref(), None).await?;
+            state
+                .store
+                .set_project_status(
+                    &project.id,
+                    ProjectStatus::Done,
+                    final_state.note.as_deref(),
+                )
+                .await?;
+            state
+                .store
+                .set_heartbeat_enabled(&project.id, false)
+                .await?;
+            state
+                .store
+                .log_action(
+                    Some(&project.id),
+                    instance_id,
+                    "mark_done",
+                    None,
+                    final_state.note.as_deref(),
+                    None,
+                )
+                .await?;
         }
         Some(TickOutcome::Error) => {
-            state.store.set_project_status(&project.id, ProjectStatus::Error, final_state.note.as_deref()).await?;
-            state.store.set_heartbeat_enabled(&project.id, false).await?;
-            state.store.log_action(Some(&project.id), instance_id, "mark_error", None, final_state.note.as_deref(), None).await?;
+            state
+                .store
+                .set_project_status(
+                    &project.id,
+                    ProjectStatus::Error,
+                    final_state.note.as_deref(),
+                )
+                .await?;
+            state
+                .store
+                .set_heartbeat_enabled(&project.id, false)
+                .await?;
+            state
+                .store
+                .log_action(
+                    Some(&project.id),
+                    instance_id,
+                    "mark_error",
+                    None,
+                    final_state.note.as_deref(),
+                    None,
+                )
+                .await?;
         }
         Some(TickOutcome::Blocked(descriptions)) => {
             for description in descriptions {
-                let task = state.store.create_human_task(&project.id, description).await?;
-                state.store.log_action(Some(&project.id), instance_id, "create_human_task", Some(&serde_json::json!({"task_id": task.id, "description": description})), final_state.note.as_deref(), None).await?;
+                let task = state
+                    .store
+                    .create_human_task(&project.id, description)
+                    .await?;
+                state
+                    .store
+                    .log_action(
+                        Some(&project.id),
+                        instance_id,
+                        "create_human_task",
+                        Some(&serde_json::json!({"task_id": task.id, "description": description})),
+                        final_state.note.as_deref(),
+                        None,
+                    )
+                    .await?;
             }
-            state.store.set_project_status(&project.id, ProjectStatus::Blocked, final_state.note.as_deref()).await?;
-            state.store.set_heartbeat_enabled(&project.id, false).await?;
+            state
+                .store
+                .set_project_status(
+                    &project.id,
+                    ProjectStatus::Blocked,
+                    final_state.note.as_deref(),
+                )
+                .await?;
+            state
+                .store
+                .set_heartbeat_enabled(&project.id, false)
+                .await?;
         }
         _ => {
-            state.store.touch_heartbeat(&project.id, final_state.note.as_deref()).await?;
+            state
+                .store
+                .touch_heartbeat(&project.id, final_state.note.as_deref())
+                .await?;
         }
     }
     Ok(())

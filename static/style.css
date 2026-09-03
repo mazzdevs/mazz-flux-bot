@@ -954,3 +954,151 @@ textarea#message-text {
 .files-editor-actions #files-save { margin-left: auto; }
 .files-status { font-size: var(--fs-xs); color: var(--ok); margin-top: var(--sp-2); }
 .files-status.error { color: var(--danger); }
+
+/* ==========================================================================
+   Project Kanban
+   ========================================================================== */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.section-heading-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+.section-heading-row h2 { margin-bottom: var(--sp-1); }
+.section-heading-row .sub { margin: 0; }
+
+.kanban-add-form {
+  max-width: 680px;
+  margin-bottom: var(--sp-5);
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-hover);
+}
+.kanban-add-form[hidden] { display: none; }
+.kanban-add-form label {
+  display: block;
+  margin: var(--sp-3) 0 var(--sp-1);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.kanban-add-form label:first-child { margin-top: 0; }
+.kanban-add-form input,
+.kanban-add-form textarea {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3);
+  font: inherit;
+}
+.kanban-add-form textarea { resize: vertical; }
+.kanban-add-form .dialog-actions { padding: var(--sp-3) 0 0; border: 0; }
+
+.kanban-board {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-3);
+  align-items: start;
+}
+.kanban-column {
+  min-width: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.kanban-column[data-status="assigned"] { border-top: 3px solid var(--warn); }
+.kanban-column[data-status="in_progress"] { border-top: 3px solid var(--accent); }
+.kanban-column[data-status="done"] { border-top: 3px solid var(--ok); }
+.kanban-column h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.02em;
+}
+.kanban-count {
+  min-width: 1.6rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--text-muted);
+  text-align: center;
+  font-size: var(--fs-xs);
+}
+.kanban-task-list { display: grid; gap: var(--sp-2); }
+.kanban-task {
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  box-shadow: 0 1px 2px var(--shadow-color);
+}
+.kanban-task h4 {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.kanban-task p {
+  margin: 0 0 var(--sp-3);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.kanban-task-meta { color: var(--text-faint); font-size: 0.7rem; }
+.kanban-task-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.kanban-task-controls select {
+  max-width: 9rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-xs);
+}
+.kanban-task-controls .btn-icon { width: 2rem; height: 2rem; }
+.kanban-task-controls .kanban-delete { color: var(--danger); }
+.kanban-empty {
+  padding: var(--sp-5) var(--sp-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  text-align: center;
+  font-size: var(--fs-xs);
+}
+
+@media (max-width: 860px) {
+  .kanban-board { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 560px) {
+  .section-heading-row { align-items: stretch; flex-direction: column; }
+  .section-heading-row > button { align-self: flex-start; }
+  .kanban-task-controls { align-items: flex-start; flex-direction: column; }
+}

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>mazz-flux-bot — project</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css?v=3" />
   <script>
     (function () {
       var saved = localStorage.getItem("mfb-theme");
@@ -100,6 +100,43 @@
       <pre id="memory-body" class="memory-body">No memory yet.</pre>
     </section>
 
+    <section id="kanban-section">
+      <div class="section-heading-row">
+        <div>
+          <h2><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> Kanban board</h2>
+          <p class="sub">Work the conductor can assign to the project's coding agent.</p>
+        </div>
+        <button id="kanban-add-toggle" class="btn-secondary" type="button" aria-expanded="false" aria-controls="kanban-add-form">
+          <svg class="icon"><use href="/icons.svg#icon-plus"></use></svg> Add task
+        </button>
+      </div>
+      <form id="kanban-add-form" class="kanban-add-form" hidden>
+        <label for="kanban-title">Task title</label>
+        <input id="kanban-title" type="text" maxlength="160" placeholder="A concise outcome" required />
+        <label for="kanban-description">Description</label>
+        <textarea id="kanban-description" rows="3" placeholder="Enough context for a coding sub-agent to complete the work"></textarea>
+        <div class="dialog-actions">
+          <button id="kanban-add-cancel" class="btn-secondary" type="button">Cancel</button>
+          <button class="btn" type="submit"><svg class="icon"><use href="/icons.svg#icon-plus"></use></svg> Add to Assigned</button>
+        </div>
+      </form>
+      <div id="kanban-board" class="kanban-board" aria-live="polite">
+        <div class="kanban-column" data-status="assigned">
+          <h3>Assigned <span class="kanban-count" data-count="assigned">0</span></h3>
+          <div class="kanban-task-list" data-list="assigned"></div>
+        </div>
+        <div class="kanban-column" data-status="in_progress">
+          <h3>In Progress <span class="kanban-count" data-count="in_progress">0</span></h3>
+          <div class="kanban-task-list" data-list="in_progress"></div>
+        </div>
+        <div class="kanban-column" data-status="done">
+          <h3>Done <span class="kanban-count" data-count="done">0</span></h3>
+          <div class="kanban-task-list" data-list="done"></div>
+        </div>
+      </div>
+      <p id="kanban-status" class="files-status" role="status"></p>
+    </section>
+
     <section id="instance-status">
       <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Live instance status</h2>
       <div id="instance-status-body" class="sub">No instance yet.</div>
@@ -133,6 +170,6 @@
   </main>
 
   <script src="/theme.js"></script>
-  <script src="/project.js"></script>
+  <script src="/project.js?v=3"></script>
 </body>
 </html>

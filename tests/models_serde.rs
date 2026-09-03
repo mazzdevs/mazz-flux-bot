@@ -1,7 +1,7 @@
 //! Serialization coverage for request/response shapes that talk to the real
 //! vape API — catches accidental field drops/renames.
 
-use mazz_flux_bot::models::{CreateInstanceRequest, CreateProjectRequest, JobConfig, Project};
+use mazz_flux_bot::models::{CreateInstanceRequest, CreateProjectRequest, JobConfig, KanbanStatus, Project};
 
 #[test]
 fn job_config_model_field_serializes_when_present() {
@@ -40,6 +40,14 @@ fn create_project_request_name_is_optional() {
 
 /// Project JSON files written before `heartbeat_prompt` existed must still
 /// deserialize — missing field means `None`, not a hard error.
+#[test]
+fn kanban_status_values_are_stable() {
+    assert_eq!(serde_json::to_string(&KanbanStatus::Assigned).unwrap(), r#""assigned""#);
+    assert_eq!(serde_json::to_string(&KanbanStatus::InProgress).unwrap(), r#""in_progress""#);
+    assert_eq!(serde_json::to_string(&KanbanStatus::Done).unwrap(), r#""done""#);
+    assert_eq!(serde_json::from_str::<KanbanStatus>(r#""in_progress""#).unwrap(), KanbanStatus::InProgress);
+}
+
 #[test]
 fn project_deserializes_without_heartbeat_prompt_field() {
     let old_json = r#"{

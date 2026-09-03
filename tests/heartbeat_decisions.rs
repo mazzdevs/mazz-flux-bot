@@ -2,7 +2,9 @@
 //! create_human_task shape) and instance naming — pure functions, no
 //! network/store involved.
 
-use mazz_flux_bot::heartbeat::{instance_name, parse_conductor_response, slugify};
+use mazz_flux_bot::heartbeat::{apply_kanban_actions, instance_name, parse_conductor_response, slugify, KanbanAction};
+use mazz_flux_bot::models::{CreateProjectRequest, KanbanStatus};
+use mazz_flux_bot::store::Store;
 
 #[test]
 fn slugify_basic() {
@@ -70,4 +72,41 @@ fn memory_field_absent_is_none() {
     let raw = r#"{"action": "wait", "note": "still working"}"#;
     let decision = parse_conductor_response(raw);
     assert_eq!(decision.memory, None);
+}
+
+#[test]
+fn send_message_can_include_kanban_transition_in_same_decision() {
+    let raw = r#"{"action":"send_message","message":"Use the Coder archetype.","kanban_actions":[{"action":"update_task","task_id":"task-123","status":"in_progress"}]}"#;
+    let decision = parse_conductor_response(raw);
+    assert_eq!(decision.action, "send_message");
+    match &decision.kanban_actions[0] {
+        KanbanAction::UpdateTask { task_id, status, .. } => {
+            assert_eq!(task_id, "task-123");
+            assert_eq!(*status, Some(KanbanStatus::InProgress));
+        }
+        other => panic!("unexpected action: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn conductor_kanban_actions_apply_and_missing_ids_are_safe() {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("mfb-heartbeat-kanban-test-{}", uuid::Uuid::new_v4()));
+    let store = Store::open(&dir).await.unwrap();
+    let project = store.create_project(CreateProjectRequest { name: Some("Board actions".into()), goal: "test board actions".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None }).await.unwrap();
+    let task = store.create_kanban_task(&project.id, "Work item", "Do the work", KanbanStatus::Assigned).await.unwrap();
+
+    apply_kanban_actions(&store, &project.id, None, &[
+        KanbanAction::UpdateTask { task_id: task.id.clone(), title: None, description: None, status: Some(KanbanStatus::InProgress) },
+        KanbanAction::UpdateTask { task_id: "missing-task".into(), title: None, description: None, status: Some(KanbanStatus::Done) },
+        KanbanAction::CreateTask { title: "Follow-up".into(), description: "Run final checks".into(), status: Some(KanbanStatus::Assigned) },
+    ]).await.unwrap();
+
+    let board = store.get_kanban_board(&project.id).await.unwrap();
+    assert_eq!(board.tasks.len(), 2);
+    assert_eq!(board.tasks.iter().find(|item| item.id == task.id).unwrap().status, KanbanStatus::InProgress);
+    assert!(board.tasks.iter().any(|item| item.title == "Follow-up"));
+    let log = store.list_action_log(Some(&project.id), 20).await.unwrap();
+    assert!(log.iter().any(|entry| entry.action == "kanban_action_rejected"));
+    std::fs::remove_dir_all(&dir).ok();
 }
