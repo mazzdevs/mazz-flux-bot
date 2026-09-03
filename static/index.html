@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>mazz-flux-bot</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>mazz-flux-bot</h1>
+    <p class="sub">one pida instance per project, heartbeat-driven</p>
+  </header>
+
+  <main>
+    <section id="create-project">
+      <h2>New project</h2>
+      <form id="create-form">
+        <input type="text" id="name" placeholder="name" required />
+        <input type="text" id="constellation" list="constellations" placeholder="constellation (e.g. back-office)" required />
+        <datalist id="constellations"></datalist>
+        <textarea id="goal" placeholder="goal — what should the agent accomplish?" required></textarea>
+        <button type="submit">Create</button>
+      </form>
+    </section>
+
+    <section id="projects">
+      <h2>Projects</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th><th>Status</th><th>Instance</th><th>Goal</th><th>Last note</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="projects-body"></tbody>
+      </table>
+    </section>
+
+    <section id="log">
+      <h2>Action log</h2>
+      <ul id="log-list"></ul>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
