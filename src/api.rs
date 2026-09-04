@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::conductor;
-use crate::models::CreateProjectRequest;
+use crate::models::{CreateProjectRequest, KanbanStatus};
 use uuid::Uuid;
 use crate::state_repo;
 use crate::AppState;
@@ -123,6 +123,151 @@ pub struct LogQuery {
 pub async fn action_log(State(state): State<AppState>, Query(q): Query<LogQuery>) -> ApiResult<Json<serde_json::Value>> {
     let entries = state.store.list_action_log(q.project_id.as_deref(), q.limit.unwrap_or(100)).await?;
     Ok(Json(json!({ "entries": entries })))
+}
+
+// ---- Project Kanban boards ----------------------------------------------
+
+pub async fn get_kanban_board(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    if state.store.get_project(&id).await?.is_none() {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "project not found"})),
+        )
+            .into_response());
+    }
+    let board = state.store.get_kanban_board(&id).await?;
+    Ok(Json(json!({ "board": board })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct CreateKanbanTaskRequest {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub status: Option<KanbanStatus>,
+}
+
+pub async fn create_kanban_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateKanbanTaskRequest>,
+) -> ApiResult<Response> {
+    if req.title.trim().is_empty() {
+        return Ok((StatusCode::BAD_REQUEST, Json(json!({"error": "task title is required"}))).into_response());
+    }
+    let task = state
+        .store
+        .create_kanban_task(
+            &id,
+            &req.title,
+            &req.description,
+            req.status.unwrap_or(KanbanStatus::Assigned),
+        )
+        .await?;
+    state
+        .store
+        .log_action(
+            Some(&id),
+            None,
+            "kanban_task_created",
+            Some(&json!({"task_id": task.id, "status": task.status})),
+            None,
+            None,
+        )
+        .await?;
+    Ok(Json(json!({ "task": task })).into_response())
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateKanbanTaskRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub status: Option<KanbanStatus>,
+}
+
+pub async fn update_kanban_task(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(req): Json<UpdateKanbanTaskRequest>,
+) -> ApiResult<Response> {
+    if req
+        .title
+        .as_ref()
+        .is_some_and(|title| title.trim().is_empty())
+    {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "task title cannot be empty"})),
+        )
+            .into_response());
+    }
+    match state
+        .store
+        .update_kanban_task(
+            &project_id,
+            &task_id,
+            req.title.as_deref(),
+            req.description.as_deref(),
+            req.status,
+        )
+        .await?
+    {
+        Some(task) => {
+            state
+                .store
+                .log_action(
+                    Some(&project_id),
+                    None,
+                    "kanban_task_updated",
+                    Some(&json!({"task_id": task.id, "status": task.status})),
+                    None,
+                    None,
+                )
+                .await?;
+            Ok(Json(json!({ "task": task })).into_response())
+        }
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "kanban task not found"})),
+        )
+            .into_response()),
+    }
+}
+
+pub async fn delete_kanban_task(
+    State(state): State<AppState>,
+    Path((project_id, task_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    if !state
+        .store
+        .delete_kanban_task(&project_id, &task_id)
+        .await?
+    {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "kanban task not found"})),
+        )
+            .into_response());
+    }
+    state
+        .store
+        .log_action(
+            Some(&project_id),
+            None,
+            "kanban_task_deleted",
+            Some(&json!({"task_id": task_id})),
+            None,
+            None,
+        )
+        .await?;
+    Ok(Json(json!({ "ok": true })).into_response())
 }
 
 // ---- Vape instances (read-through cache) --------------------------------

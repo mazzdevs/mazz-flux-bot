@@ -161,6 +161,44 @@ pub fn default_archetype_model() -> String {
     "openai/gpt-5.6-sol-pro".to_string()
 }
 
+/// Workflow state for a task on a project's Kanban board. Serialized values
+/// are stable API/storage identifiers; the UI renders their human labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KanbanStatus {
+    Assigned,
+    InProgress,
+    Done,
+}
+
+impl KanbanStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Assigned => "assigned",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KanbanTask {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: KanbanStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One board per project, stored as `kanban/{project_id}.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KanbanBoard {
+    pub project_id: String,
+    pub tasks: Vec<KanbanTask>,
+    pub updated_at: String,
+}
+
 // ---- Vape API response shapes -------------------------------------------------
 //
 // Fields we don't strictly need to introspect are left out (unknown fields are

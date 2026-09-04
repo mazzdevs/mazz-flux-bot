@@ -77,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/projects/{id}/pause", post(api::pause_project))
         .route("/api/projects/{id}/message", post(api::send_project_message))
         .route("/api/projects/{id}/notes", get(api::list_project_notes))
+        .route("/api/projects/{id}/kanban", get(api::get_kanban_board).post(api::create_kanban_task))
+        .route("/api/projects/{project_id}/kanban/{task_id}", post(api::update_kanban_task).delete(api::delete_kanban_task))
         .route("/api/human-tasks", get(api::list_human_tasks))
         .route("/api/human-tasks/{id}/resolve", post(api::resolve_human_task))
         .route("/api/log", get(api::action_log))

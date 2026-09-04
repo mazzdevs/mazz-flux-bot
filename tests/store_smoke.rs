@@ -1,7 +1,7 @@
 //! Smoke test for the file-backed `Store` — notes, human tasks, settings,
 //! action log round-trip through real files on disk (a tempdir), not mocks.
 
-use mazz_flux_bot::models::{CreateProjectRequest, ProjectStatus};
+use mazz_flux_bot::models::{CreateProjectRequest, KanbanStatus, ProjectStatus};
 use mazz_flux_bot::store::Store;
 
 #[tokio::test]
@@ -215,6 +215,41 @@ async fn file_browser_reads_writes_and_blocks_escapes() {
     assert!(store.browse(".git").await.is_err());
     assert!(store.write_file(".git/config", "nope").await.is_err());
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn kanban_board_crud_and_missing_board_are_safe() {
+    let dir = tempfile_dir();
+    let store = Store::open(&dir).await.unwrap();
+    let project = store.create_project(CreateProjectRequest { name: Some("Kanban test".into()), goal: "exercise storage".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None }).await.unwrap();
+    let board_path = dir.join("kanban").join(format!("{}.json", project.id));
+    assert!(board_path.exists());
+    assert!(store.get_kanban_board(&project.id).await.unwrap().tasks.is_empty());
+
+    std::fs::remove_file(&board_path).unwrap();
+    assert!(store.get_kanban_board(&project.id).await.unwrap().tasks.is_empty());
+    let task = store.create_kanban_task(&project.id, "Add endpoint", "Implement and test it", KanbanStatus::Assigned).await.unwrap();
+    let updated = store.update_kanban_task(&project.id, &task.id, None, None, Some(KanbanStatus::InProgress)).await.unwrap().unwrap();
+    assert_eq!(updated.status, KanbanStatus::InProgress);
+
+    let before = std::fs::read_to_string(&board_path).unwrap();
+    assert!(store.update_kanban_task(&project.id, "missing-task", None, None, Some(KanbanStatus::Done)).await.unwrap().is_none());
+    assert_eq!(std::fs::read_to_string(&board_path).unwrap(), before);
+    assert!(store.delete_kanban_task(&project.id, &task.id).await.unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn deleting_project_removes_its_kanban_file() {
+    let dir = tempfile_dir();
+    let store = Store::open(&dir).await.unwrap();
+    let project = store.create_project(CreateProjectRequest { name: Some("Delete test".into()), goal: "delete cleanly".into(), heartbeat_prompt: None, constellation: None, heartbeat_interval_secs: None }).await.unwrap();
+    let board_path = dir.join("kanban").join(format!("{}.json", project.id));
+    assert!(board_path.exists());
+    store.delete_project(&project.id).await.unwrap();
+    assert!(!board_path.exists());
+    assert!(store.get_project(&project.id).await.unwrap().is_none());
     std::fs::remove_dir_all(&dir).ok();
 }
 

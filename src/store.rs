@@ -15,6 +15,7 @@
 //!   projects/<project_id>.json
 //!   notes/<project_id>/<rfc3339>__<uuid8>.md
 //!   memory/<project_id>.md          # conductor-authored, overwritten each tick
+//!   kanban/<project_id>.json         # project work board
 //!   agent_prompts/<name>.md          # user-authored, read-only from the bot's side
 //!   human_tasks/<project_id>/<task_id>.json
 //!   action_log/<yyyy-mm-dd>.ndjson
@@ -28,7 +29,7 @@ use anyhow::{Context, Result};
 use tokio::fs;
 use tokio::sync::Mutex;
 
-use crate::models::{default_archetype_model, ActionLogEntry, Archetype, CreateProjectRequest, HumanTask, Project, ProjectNote, ProjectStatus};
+use crate::models::{default_archetype_model, ActionLogEntry, Archetype, CreateProjectRequest, HumanTask, KanbanBoard, KanbanStatus, KanbanTask, Project, ProjectNote, ProjectStatus};
 
 pub struct Store {
     root: PathBuf,
@@ -152,6 +153,9 @@ impl Store {
     fn memory_path(&self, project_id: &str) -> PathBuf {
         self.root.join("memory").join(format!("{project_id}.md"))
     }
+    fn kanban_path(&self, project_id: &str) -> PathBuf {
+        self.root.join("kanban").join(format!("{project_id}.json"))
+    }
     fn archetype_path(&self, slug: &str) -> PathBuf {
         self.root.join("archetypes").join(format!("{slug}.md"))
     }
@@ -177,10 +181,11 @@ impl Store {
             heartbeat_interval_secs: req.heartbeat_interval_secs.unwrap_or(crate::heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS),
             last_note: None,
             created_at: ts.clone(),
-            updated_at: ts,
+            updated_at: ts.clone(),
             last_heartbeat_at: None,
         };
         write_json(&self.project_path(&id), &project).await?;
+        write_json(&self.kanban_path(&id), &KanbanBoard { project_id: id.clone(), tasks: Vec::new(), updated_at: ts }).await?;
         Ok(project)
     }
 
@@ -201,12 +206,14 @@ impl Store {
 
     pub async fn delete_project(&self, id: &str) -> Result<()> {
         let _guard = self.lock.lock().await;
-        let path = self.project_path(id);
-        match fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+        for path in [self.project_path(id), self.kanban_path(id)] {
+            match fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+            }
         }
+        Ok(())
     }
 
     async fn update_project(&self, id: &str, f: impl FnOnce(&mut Project)) -> Result<()> {
@@ -271,6 +278,64 @@ impl Store {
             }
         })
         .await
+    }
+
+    // ---- Kanban -----------------------------------------------------------
+
+    fn empty_kanban_board(project_id: &str) -> KanbanBoard {
+        KanbanBoard { project_id: project_id.to_string(), tasks: Vec::new(), updated_at: now() }
+    }
+
+    /// Missing boards are empty for projects created before Kanban support.
+    pub async fn get_kanban_board(&self, project_id: &str) -> Result<KanbanBoard> {
+        Ok(read_json(&self.kanban_path(project_id)).await?.unwrap_or_else(|| Self::empty_kanban_board(project_id)))
+    }
+
+    pub async fn create_kanban_task(&self, project_id: &str, title: &str, description: &str, status: KanbanStatus) -> Result<KanbanTask> {
+        let _guard = self.lock.lock().await;
+        if read_json::<Project>(&self.project_path(project_id)).await?.is_none() {
+            anyhow::bail!("project {project_id} not found");
+        }
+        let path = self.kanban_path(project_id);
+        let mut board = read_json(&path).await?.unwrap_or_else(|| Self::empty_kanban_board(project_id));
+        let ts = now();
+        let task = KanbanTask {
+            id: uuid::Uuid::new_v4().to_string(), title: title.trim().to_string(), description: description.trim().to_string(),
+            status, created_at: ts.clone(), updated_at: ts.clone(),
+        };
+        board.tasks.push(task.clone());
+        board.updated_at = ts;
+        write_json(&path, &board).await?;
+        Ok(task)
+    }
+
+    /// Returns None for an unknown task id without touching the board file.
+    pub async fn update_kanban_task(&self, project_id: &str, task_id: &str, title: Option<&str>, description: Option<&str>, status: Option<KanbanStatus>) -> Result<Option<KanbanTask>> {
+        let _guard = self.lock.lock().await;
+        let path = self.kanban_path(project_id);
+        let Some(mut board): Option<KanbanBoard> = read_json(&path).await? else { return Ok(None) };
+        let Some(task) = board.tasks.iter_mut().find(|task| task.id == task_id) else { return Ok(None) };
+        if let Some(title) = title { task.title = title.trim().to_string(); }
+        if let Some(description) = description { task.description = description.trim().to_string(); }
+        if let Some(status) = status { task.status = status; }
+        let ts = now();
+        task.updated_at = ts.clone();
+        let updated = task.clone();
+        board.updated_at = ts;
+        write_json(&path, &board).await?;
+        Ok(Some(updated))
+    }
+
+    pub async fn delete_kanban_task(&self, project_id: &str, task_id: &str) -> Result<bool> {
+        let _guard = self.lock.lock().await;
+        let path = self.kanban_path(project_id);
+        let Some(mut board): Option<KanbanBoard> = read_json(&path).await? else { return Ok(false) };
+        let old_len = board.tasks.len();
+        board.tasks.retain(|task| task.id != task_id);
+        if board.tasks.len() == old_len { return Ok(false); }
+        board.updated_at = now();
+        write_json(&path, &board).await?;
+        Ok(true)
     }
 
     // ---- Action log (append-only, day-sharded ndjson) ----------------------

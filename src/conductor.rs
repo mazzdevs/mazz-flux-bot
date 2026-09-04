@@ -177,23 +177,26 @@ impl Conductor {
     /// `goal.to_string()` on any failure/empty response (see
     /// `heartbeat::CreateInstanceNode`) — this must never block instance
     /// creation.
-    /// `archetypes_json` is an optional pre-serialized JSON array of the
-    /// archetype catalog (see `models::Archetype`) — if the goal implies a
-    /// primary role (e.g. fundamentally a research task), the opening
-    /// message can establish that persona too. Pass `None`/empty to skip.
-    pub async fn compose_initial_prompt(&self, project_name: &str, goal: &str, archetypes_json: Option<&str>) -> Result<String> {
+    /// Optional serialized archetype and Kanban context lets an opening
+    /// message select existing Assigned work as well as a fitting persona.
+    pub async fn compose_initial_prompt(&self, project_name: &str, goal: &str, archetypes_json: Option<&str>, kanban_json: Option<&str>) -> Result<String> {
         const SYSTEM: &str = "You are opening a new coding-agent session on behalf of a developer. \
             Write the first message to the agent, in your own words, directing it toward the \
             goal below. Be concrete and actionable — give the agent clear direction on how to \
             start, not just a restatement of the goal. If an `archetypes` catalog is provided and \
             the goal clearly implies a primary role (e.g. it's fundamentally a research task, or \
             a review task), you may open by briefly establishing that persona using the matching \
-            archetype's description — but only if it's a clear fit, never force one. Respond with \
-            ONLY the message text, no preamble, no quotes around it, no markdown fences.";
-        let user = match archetypes_json.filter(|s| !s.is_empty()) {
-            Some(archetypes) => format!("Project name: {project_name}\nGoal: {goal}\nArchetypes: {archetypes}"),
-            None => format!("Project name: {project_name}\nGoal: {goal}"),
-        };
+            archetype's description — but only if it's a clear fit, never force one. If a `kanban` \
+            board contains Assigned tasks, choose one concrete task to begin and name its stable ID \
+            in the message so later heartbeat decisions can track it. Respond with ONLY the message \
+            text, no preamble, no quotes around it, no markdown fences.";
+        let mut user = format!("Project name: {project_name}\nGoal: {goal}");
+        if let Some(archetypes) = archetypes_json.filter(|s| !s.is_empty()) {
+            user.push_str(&format!("\nArchetypes: {archetypes}"));
+        }
+        if let Some(kanban) = kanban_json.filter(|s| !s.is_empty()) {
+            user.push_str(&format!("\nKanban: {kanban}"));
+        }
         self.decide(SYSTEM, &user).await
     }
 
