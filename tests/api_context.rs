@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use axum::routing::get;
+use axum::routing::{get, post};
 use mazz_flux_bot::heartbeat::HeartbeatClock;
 use mazz_flux_bot::models::{CreateProjectRequest, KanbanStatus};
 use mazz_flux_bot::store::Store;
@@ -30,6 +30,7 @@ async fn test_app() -> (Router, Arc<Store>, std::path::PathBuf) {
             "/api/settings",
             get(api::get_settings).post(api::update_settings),
         )
+        .route("/api/projects/{id}/name", post(api::set_project_name))
         .with_state(state);
     (app, store, dir)
 }
@@ -159,6 +160,50 @@ async fn agent_context_returns_404_for_unknown_project() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(json_body(response).await["error"], "project not found");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn project_name_can_be_updated_with_validation() {
+    let (app, store, dir) = test_app().await;
+    let project = store
+        .create_project(CreateProjectRequest {
+            name: Some("Original name".into()),
+            goal: "Ship it".into(),
+            heartbeat_prompt: None,
+            constellation: None,
+            heartbeat_interval_secs: None,
+        })
+        .await
+        .unwrap();
+
+    let rename = Request::builder()
+        .method("POST")
+        .uri(format!("/api/projects/{}/name", project.id))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"name":"  Better name  "}).to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(rename).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["project"]["name"], "Better name");
+    assert_eq!(store.get_project(&project.id).await.unwrap().unwrap().name, "Better name");
+
+    let empty = Request::builder()
+        .method("POST")
+        .uri(format!("/api/projects/{}/name", project.id))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"name":"   "}).to_string()))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(empty).await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+    let missing = Request::builder()
+        .method("POST")
+        .uri("/api/projects/missing/name")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"name":"New name"}).to_string()))
+        .unwrap();
+    assert_eq!(app.oneshot(missing).await.unwrap().status(), StatusCode::NOT_FOUND);
+
     std::fs::remove_dir_all(dir).ok();
 }
 

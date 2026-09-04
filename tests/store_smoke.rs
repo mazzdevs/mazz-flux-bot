@@ -162,9 +162,11 @@ async fn goal_and_heartbeat_prompt_editable() {
         .unwrap();
     assert_eq!(project.heartbeat_prompt, None);
 
+    store.set_project_name(&project.id, "renamed project").await.unwrap();
     store.set_goal(&project.id, "updated goal").await.unwrap();
     store.set_heartbeat_prompt(&project.id, "focus on tests this tick").await.unwrap();
     let updated = store.get_project(&project.id).await.unwrap().unwrap();
+    assert_eq!(updated.name, "renamed project");
     assert_eq!(updated.goal, "updated goal");
     assert_eq!(updated.heartbeat_prompt, Some("focus on tests this tick".to_string()));
 

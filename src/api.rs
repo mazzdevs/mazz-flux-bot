@@ -556,6 +556,28 @@ pub async fn set_heartbeat_interval(
 }
 
 #[derive(Deserialize)]
+pub struct SetProjectNameRequest {
+    pub name: String,
+}
+
+pub async fn set_project_name(State(state): State<AppState>, Path(id): Path<String>, Json(req): Json<SetProjectNameRequest>) -> ApiResult<Response> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Ok((StatusCode::BAD_REQUEST, Json(json!({"error": "project name is required"}))).into_response());
+    }
+    if name.chars().count() > 120 {
+        return Ok((StatusCode::BAD_REQUEST, Json(json!({"error": "project name must be 120 characters or fewer"}))).into_response());
+    }
+    let Some(existing) = state.store.get_project(&id).await? else {
+        return Ok((StatusCode::NOT_FOUND, Json(json!({"error": "project not found"}))).into_response());
+    };
+    state.store.set_project_name(&id, name).await?;
+    state.store.log_action(Some(&id), None, "project_renamed", Some(&json!({"from": existing.name, "to": name})), None, None).await?;
+    let project = state.store.get_project(&id).await?;
+    Ok(Json(json!({ "project": project })).into_response())
+}
+
+#[derive(Deserialize)]
 pub struct SetGoalRequest {
     pub goal: String,
 }

@@ -68,6 +68,8 @@ async function loadProject() {
   document.getElementById("project-goal").textContent = p.goal;
   document.title = `mazz-flux-bot — ${p.name}`;
 
+  const nameInput = document.getElementById("name-input");
+  if (document.activeElement !== nameInput) nameInput.value = p.name;
   const goalInput = document.getElementById("goal-input");
   if (document.activeElement !== goalInput) goalInput.value = p.goal;
   const heartbeatPromptInput = document.getElementById("heartbeat-prompt-input");
@@ -397,6 +399,26 @@ document.getElementById("p-force-heartbeat").addEventListener("click", async (ev
   } finally {
     btn.disabled = false;
     btn.textContent = original;
+  }
+});
+
+document.getElementById("name-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const statusEl = document.getElementById("name-status");
+  const name = document.getElementById("name-input").value.trim();
+  if (!name) {
+    statusEl.textContent = "Project name is required.";
+    statusEl.classList.add("error");
+    return;
+  }
+  try {
+    await api(`/api/projects/${projectId}/name`, { method: "POST", body: JSON.stringify({ name }) });
+    statusEl.textContent = "saved";
+    statusEl.classList.remove("error");
+    await tick();
+  } catch (e) {
+    statusEl.textContent = e.message;
+    statusEl.classList.add("error");
   }
 });
 

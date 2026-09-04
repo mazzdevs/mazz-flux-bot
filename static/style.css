@@ -852,9 +852,9 @@ textarea#message-text {
 .instance-links li a:hover { text-decoration: underline; }
 .instance-links .empty { color: var(--text-muted); font-style: italic; font-size: var(--fs-sm); }
 
-.inline-form { display: flex; align-items: center; gap: var(--sp-2); }
-.inline-form input[type="number"] {
-  width: 5.5rem;
+.inline-form { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.inline-form input[type="number"],
+.inline-form input[type="text"] {
   background: var(--bg);
   border: 1px solid var(--border-strong);
   color: var(--text);
@@ -863,6 +863,8 @@ textarea#message-text {
   font-size: var(--fs-sm);
   font-family: inherit;
 }
+.inline-form input[type="number"] { width: 5.5rem; }
+.inline-form input[type="text"] { width: min(24rem, 100%); }
 .inline-form select {
   background: var(--bg);
   border: 1px solid var(--border-strong);
