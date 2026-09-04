@@ -2,6 +2,7 @@ pub mod api;
 pub mod conductor;
 pub mod heartbeat;
 pub mod models;
+pub mod public_url;
 pub mod state_repo;
 pub mod store;
 pub mod vape_client;

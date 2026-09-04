@@ -29,6 +29,7 @@ use tracing::{error, info, warn};
 
 use crate::conductor::Conductor;
 use crate::models::{CreateInstanceRequest, JobConfig, KanbanStatus, PidaStatus, Project, ProjectStatus};
+use crate::public_url;
 use crate::vape_client::VapeClient;
 use crate::AppState;
 
@@ -450,6 +451,35 @@ async fn compose_initial_prompt(
     (goal.to_string(), "verbatim_goal_fallback")
 }
 
+/// Appends integration metadata after conductor composition without rewriting
+/// any conductor-authored text. The child gets one project-scoped, read-only
+/// endpoint rather than being encouraged to discover the bot's mutation APIs.
+pub fn append_live_agent_context(prompt: &str, project_id: &str, base_url: &str) -> String {
+    let context_url = format!("{base_url}/api/projects/{project_id}/agent-context");
+    format!(
+        "{prompt}\n\n## Live mazz-flux-bot context\n\n\
+This project is orchestrated by mazz-flux-bot.\n\n\
+- Project ID: `{project_id}`\n\
+- Bot API: `{base_url}`\n\
+- Current context: `{context_url}`\n\n\
+Before planning work, and again whenever orchestration state may have changed, fetch that read-only endpoint. It contains the current project direction, Kanban tasks, and available agent archetypes. Treat the latest response as the source of truth rather than relying on an earlier snapshot.\n\n\
+Example:\n\n\
+    curl --fail --silent --show-error \"{context_url}\"\n\n\
+Use these details when selecting work and choosing an archetype for a sub-agent. Do not call other mazz-flux-bot endpoints unless the user explicitly instructs you to. The URL points back to the bot; do not replace it with this child instance's URL."
+    )
+}
+
+pub fn apply_live_agent_context(
+    prompt: String,
+    project_id: &str,
+    resolution: &public_url::PublicUrlResolution,
+) -> (String, bool) {
+    match resolution.url.as_deref() {
+        Some(base_url) => (append_live_agent_context(&prompt, project_id, base_url), true),
+        None => (prompt, false),
+    }
+}
+
 #[async_trait::async_trait]
 impl Node<HeartbeatState> for CreateInstanceNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
@@ -487,7 +517,7 @@ impl Node<HeartbeatState> for CreateInstanceNode {
                 updated_at: chrono::Utc::now().to_rfc3339(),
             });
         let kanban_json = serde_json::to_string(&kanban).ok();
-        let (prompt, prompt_source) = compose_initial_prompt(
+        let (composed_prompt, prompt_source) = compose_initial_prompt(
             &self.conductor,
             &state.project_name,
             &state.goal,
@@ -495,6 +525,22 @@ impl Node<HeartbeatState> for CreateInstanceNode {
             kanban_json.as_deref(),
         )
         .await;
+        let public_url = public_url::resolve_public_url(&self.store).await;
+        let (prompt, live_context_attached) = apply_live_agent_context(composed_prompt, &state.project_id, &public_url);
+        if !live_context_attached {
+            warn!(project_id = %state.project_id, "bot public URL unavailable; spawning without live agent context");
+        }
+        let _ = self
+            .store
+            .log_action(
+                Some(&state.project_id),
+                None,
+                "instance_live_context",
+                Some(&serde_json::json!({"attached": live_context_attached, "url_source": public_url.source})),
+                None,
+                None,
+            )
+            .await;
 
         let req = CreateInstanceRequest {
             name,

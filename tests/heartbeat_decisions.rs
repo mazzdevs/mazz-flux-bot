@@ -2,8 +2,9 @@
 //! create_human_task shape) and instance naming — pure functions, no
 //! network/store involved.
 
-use mazz_flux_bot::heartbeat::{apply_kanban_actions, instance_name, parse_conductor_response, slugify, KanbanAction};
+use mazz_flux_bot::heartbeat::{append_live_agent_context, apply_kanban_actions, apply_live_agent_context, instance_name, parse_conductor_response, slugify, KanbanAction};
 use mazz_flux_bot::models::{CreateProjectRequest, KanbanStatus};
+use mazz_flux_bot::public_url::{PublicUrlResolution, PublicUrlSource};
 use mazz_flux_bot::store::Store;
 
 #[test]
@@ -86,6 +87,30 @@ fn send_message_can_include_kanban_transition_in_same_decision() {
         }
         other => panic!("unexpected action: {other:?}"),
     }
+}
+
+#[test]
+fn live_agent_context_is_appended_without_rewriting_composed_prompt() {
+    let composed = "Inspect the repository and begin with the assigned work.";
+    let result = append_live_agent_context(composed, "project-123", "https://preview-4270--bot.example");
+    assert!(result.starts_with(composed));
+    assert_eq!(&result[..composed.len()], composed);
+    assert!(result.contains("Project ID: `project-123`"));
+    assert!(result.contains("Bot API: `https://preview-4270--bot.example`"));
+    assert!(result.contains("https://preview-4270--bot.example/api/projects/project-123/agent-context"));
+    assert!(result.contains("curl --fail --silent --show-error"));
+    assert!(result.contains("source of truth"));
+    assert!(result.contains("Do not call other mazz-flux-bot endpoints"));
+    assert!(!result.contains("archetypes\": ["));
+}
+
+#[test]
+fn unavailable_public_url_preserves_composed_prompt() {
+    let composed = "Keep this conductor-authored text unchanged.".to_string();
+    let resolution = PublicUrlResolution { url: None, source: PublicUrlSource::Unavailable };
+    let (result, attached) = apply_live_agent_context(composed.clone(), "project-123", &resolution);
+    assert_eq!(result, composed);
+    assert!(!attached);
 }
 
 #[tokio::test]

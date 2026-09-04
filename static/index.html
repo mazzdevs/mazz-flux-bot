@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>mazz-flux-bot</title>
-  <link rel="stylesheet" href="/style.css?v=2" />
+  <link rel="stylesheet" href="/style.css?v=3" />
   <script>
     // Set the theme before first paint to avoid a flash of the wrong theme.
     (function () {
@@ -105,16 +105,21 @@
 
   <dialog id="settings-dialog">
     <form id="settings-form">
-      <h2><svg class="icon"><use href="/icons.svg#icon-settings"></use></svg> Model settings</h2>
-      <p class="sub">API key comes from the OPENROUTER_API_KEY environment variable only — this just picks which model to use.</p>
+      <h2><svg class="icon"><use href="/icons.svg#icon-settings"></use></svg> Settings</h2>
+      <p class="sub">API keys remain environment-only. Configure models and how new workers find this bot.</p>
 
-      <label>Conductor model</label>
+      <label for="conductor-model">Conductor model</label>
       <input type="text" id="conductor-model" placeholder="openai/gpt-5.6-sol" />
-      <p class="sub" style="margin-top:0.25rem">Makes wait/steer/done decisions each heartbeat tick.</p>
+      <p class="sub settings-help">Makes wait/steer/done decisions each heartbeat tick.</p>
 
-      <label>Instance model</label>
+      <label for="instance-model">Instance model</label>
       <input type="text" id="instance-model" placeholder="openai/gpt-5.6-sol" />
-      <p class="sub" style="margin-top:0.25rem">Used by vape instances this bot spawns.</p>
+      <p class="sub settings-help">Used by Flux instances this bot spawns.</p>
+
+      <label for="bot-public-base-url">Bot public URL <span class="hint">optional override</span></label>
+      <input type="url" id="bot-public-base-url" placeholder="Auto-detected from this Flux instance" autocomplete="url" />
+      <p class="sub settings-help">New workers use this URL to read their live project, Kanban, and archetype context. Clear it to resume automatic detection.</p>
+      <p id="bot-public-url-status" class="settings-url-status" role="status"></p>
 
       <div class="dialog-actions">
         <button type="button" id="settings-close" class="btn-secondary">Close</button>
@@ -224,7 +229,7 @@
   </main>
 
   <script src="/theme.js"></script>
-  <script src="/app.js?v=2"></script>
+  <script src="/app.js?v=3"></script>
   <script src="/archetypes.js?v=2"></script>
   <script src="/files.js"></script>
 </body>

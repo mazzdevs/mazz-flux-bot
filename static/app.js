@@ -220,17 +220,39 @@ loadConstellations();
 tick();
 setInterval(tick, 5000);
 
-// ---- Settings dialog (model selection only — no API keys) --------------
+// ---- Settings dialog (models + public bot URL; no API keys) ------------
 
 const settingsDialog = document.getElementById("settings-dialog");
+const publicUrlStatus = document.getElementById("bot-public-url-status");
+
+function showPublicUrlStatus(settings, error) {
+  publicUrlStatus.classList.toggle("error", Boolean(error));
+  if (error) {
+    publicUrlStatus.textContent = error;
+    return;
+  }
+  const sourceLabels = {
+    settings: "Saved override",
+    environment: "Environment",
+    derived: "Auto-detected",
+    unavailable: "Unavailable",
+  };
+  const source = sourceLabels[settings.bot_public_base_url_source] || settings.bot_public_base_url_source;
+  publicUrlStatus.textContent = settings.effective_bot_public_base_url
+    ? `${source}: ${settings.effective_bot_public_base_url}`
+    : "Unavailable — configure an override before spawning workers that need live bot context.";
+}
 
 async function loadSettings() {
   try {
     const s = await api("/api/settings");
     document.getElementById("conductor-model").value = s.conductor_model;
     document.getElementById("instance-model").value = s.instance_model;
+    document.getElementById("bot-public-base-url").value = s.bot_public_base_url || "";
+    showPublicUrlStatus(s);
   } catch (e) {
     console.warn("failed to load settings", e);
+    showPublicUrlStatus({}, e.message);
   }
 }
 
@@ -244,11 +266,20 @@ document.getElementById("settings-form").addEventListener("submit", async (ev) =
   ev.preventDefault();
   const conductorModel = document.getElementById("conductor-model").value.trim();
   const instanceModel = document.getElementById("instance-model").value.trim();
+  const botPublicBaseUrl = document.getElementById("bot-public-base-url").value.trim();
   try {
-    await api("/api/settings", { method: "POST", body: JSON.stringify({ conductor_model: conductorModel, instance_model: instanceModel }) });
+    const settings = await api("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        conductor_model: conductorModel,
+        instance_model: instanceModel,
+        bot_public_base_url: botPublicBaseUrl,
+      }),
+    });
+    showPublicUrlStatus(settings);
     settingsDialog.close();
   } catch (e) {
-    alert(e.message);
+    showPublicUrlStatus({}, e.message);
   }
 });
 

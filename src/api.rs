@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::conductor;
-use crate::models::{CreateProjectRequest, KanbanStatus};
+use crate::models::{Archetype, CreateProjectRequest, KanbanBoard, KanbanStatus, Project};
+use crate::public_url::{self, PublicUrlSource};
 use uuid::Uuid;
 use crate::state_repo;
 use crate::AppState;
@@ -73,6 +74,52 @@ pub async fn get_project(State(state): State<AppState>, Path(id): Path<String>) 
         Some(p) => Ok(Json(json!({ "project": p })).into_response()),
         None => Ok((StatusCode::NOT_FOUND, Json(json!({"error": "project not found"}))).into_response()),
     }
+}
+
+#[derive(Serialize)]
+pub struct AgentProjectContext {
+    pub id: String,
+    pub name: String,
+    pub goal: String,
+    pub heartbeat_prompt: Option<String>,
+    pub status: String,
+    pub vape_instance_id: Option<String>,
+    pub last_note: Option<String>,
+    pub last_heartbeat_at: Option<String>,
+}
+
+impl From<Project> for AgentProjectContext {
+    fn from(project: Project) -> Self {
+        Self {
+            id: project.id,
+            name: project.name,
+            goal: project.goal,
+            heartbeat_prompt: project.heartbeat_prompt,
+            status: project.status,
+            vape_instance_id: project.vape_instance_id,
+            last_note: project.last_note,
+            last_heartbeat_at: project.last_heartbeat_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct AgentContextResponse {
+    pub project: AgentProjectContext,
+    pub kanban: KanbanBoard,
+    pub archetypes: Vec<Archetype>,
+}
+
+/// Purpose-built read-only context for the pida instance assigned to this
+/// project. It intentionally excludes settings, logs, transcripts, and other
+/// projects.
+pub async fn get_agent_context(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    let Some(project) = state.store.get_project(&id).await? else {
+        return Ok((StatusCode::NOT_FOUND, Json(json!({"error": "project not found"}))).into_response());
+    };
+    let kanban = state.store.get_kanban_board(&id).await?;
+    let archetypes = state.store.list_archetypes().await?;
+    Ok(Json(AgentContextResponse { project: project.into(), kanban, archetypes }).into_response())
 }
 
 pub async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
@@ -313,18 +360,33 @@ pub async fn list_constellations(State(state): State<AppState>) -> ApiResult<Jso
     Ok(Json(json!({ "constellations": constellations })))
 }
 
-// ---- Settings (model selection only — no API keys) -----------------------
+// ---- Settings (models + public callback URL; no API keys) ----------------
 
 #[derive(Serialize)]
 pub struct SettingsResponse {
     pub conductor_model: String,
     pub instance_model: String,
+    pub bot_public_base_url: Option<String>,
+    pub effective_bot_public_base_url: Option<String>,
+    pub bot_public_base_url_source: PublicUrlSource,
+}
+
+async fn settings_response(state: &AppState) -> ApiResult<SettingsResponse> {
+    let conductor_model = conductor::resolve_model(&state.store, "conductor_model", "OPENROUTER_MODEL", conductor::DEFAULT_MODEL).await;
+    let instance_model = conductor::resolve_model(&state.store, "instance_model", "MAZZ_FLUX_INSTANCE_MODEL", conductor::DEFAULT_MODEL).await;
+    let bot_public_base_url = state.store.get_setting(public_url::PUBLIC_URL_SETTING).await?;
+    let effective = public_url::resolve_public_url(&state.store).await;
+    Ok(SettingsResponse {
+        conductor_model,
+        instance_model,
+        bot_public_base_url,
+        effective_bot_public_base_url: effective.url,
+        bot_public_base_url_source: effective.source,
+    })
 }
 
 pub async fn get_settings(State(state): State<AppState>) -> ApiResult<Json<SettingsResponse>> {
-    let conductor_model = conductor::resolve_model(&state.store, "conductor_model", "OPENROUTER_MODEL", conductor::DEFAULT_MODEL).await;
-    let instance_model = conductor::resolve_model(&state.store, "instance_model", "MAZZ_FLUX_INSTANCE_MODEL", conductor::DEFAULT_MODEL).await;
-    Ok(Json(SettingsResponse { conductor_model, instance_model }))
+    Ok(Json(settings_response(&state).await?))
 }
 
 #[derive(Deserialize, Default)]
@@ -333,19 +395,30 @@ pub struct UpdateSettingsRequest {
     pub conductor_model: Option<String>,
     #[serde(default)]
     pub instance_model: Option<String>,
+    #[serde(default)]
+    pub bot_public_base_url: Option<String>,
 }
 
-pub async fn update_settings(State(state): State<AppState>, Json(req): Json<UpdateSettingsRequest>) -> ApiResult<Json<SettingsResponse>> {
+pub async fn update_settings(State(state): State<AppState>, Json(req): Json<UpdateSettingsRequest>) -> ApiResult<Response> {
+    let normalized_public_url = match req.bot_public_base_url.as_deref() {
+        Some(value) if !value.trim().is_empty() => match public_url::normalize_public_base_url(value) {
+            Ok(url) => Some(url),
+            Err(error) => return Ok((StatusCode::BAD_REQUEST, Json(json!({"error": error.to_string()}))).into_response()),
+        },
+        Some(_) => Some(String::new()),
+        None => None,
+    };
     if let Some(v) = &req.conductor_model {
         state.store.set_setting("conductor_model", v).await?;
     }
     if let Some(v) = &req.instance_model {
         state.store.set_setting("instance_model", v).await?;
     }
+    if let Some(v) = normalized_public_url {
+        state.store.set_setting(public_url::PUBLIC_URL_SETTING, &v).await?;
+    }
     state.store.log_action(None, None, "settings_updated", None, None, None).await?;
-    let conductor_model = conductor::resolve_model(&state.store, "conductor_model", "OPENROUTER_MODEL", conductor::DEFAULT_MODEL).await;
-    let instance_model = conductor::resolve_model(&state.store, "instance_model", "MAZZ_FLUX_INSTANCE_MODEL", conductor::DEFAULT_MODEL).await;
-    Ok(Json(SettingsResponse { conductor_model, instance_model }))
+    Ok(Json(settings_response(&state).await?).into_response())
 }
 
 // ---- Human tasks (conductor-raised blockers) -----------------------------
