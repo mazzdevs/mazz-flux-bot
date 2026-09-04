@@ -299,6 +299,15 @@ dialog#settings-dialog label, dialog#create-dialog label {
   letter-spacing: 0.04em;
 }
 dialog#settings-dialog .hint { color: var(--ok); font-style: italic; text-transform: none; font-weight: 400; letter-spacing: 0; }
+dialog#settings-dialog .settings-help { margin: var(--sp-1) 0 0; font-size: var(--fs-xs); }
+.settings-url-status {
+  color: var(--ok);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  margin: var(--sp-2) 0 0;
+  overflow-wrap: anywhere;
+}
+.settings-url-status.error { color: var(--danger); }
 dialog#settings-dialog input, dialog#create-dialog input, dialog#create-dialog textarea {
   width: 100%;
   background: var(--bg);

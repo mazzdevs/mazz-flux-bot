@@ -28,6 +28,7 @@ Coding agents are great at *doing* work but bad at *staying on task* unattended.
 
 - **One instance per project.** Give it a goal, it spins up a real `pida`-harness VAPE instance and manages the whole lifecycle.
 - **LLM-composed prompts, not templates.** The conductor writes the actual opening message to the agent *in its own words* from your goal — and composes each heartbeat's steering message the same way, informed by your optional **heartbeat prompt** plus its own running memory. Nothing is ever sent to the agent verbatim.
+- **Live context for every worker.** New pida instances receive a project-specific, read-only API URL so they can refresh their project direction, Kanban board, and available archetypes instead of relying on a stale launch-time snapshot.
 - **Persistent, compacted memory.** Every tick, the conductor rewrites a single memory file summarizing everything worth remembering — no unbounded context growth, no re-reading full history every time.
 - **Human-in-the-loop, properly.** When the conductor hits a blocker only a person can resolve, it raises one or more discrete **human tasks** — even splitting a multi-item reply from the agent into separate, independently-resolvable tasks instead of one wall of text.
 - **Per-project heartbeat cadence**, editable in seconds/minutes/hours right from the UI (default 15 minutes) — plus a **Force heartbeat** button when you don't want to wait.
@@ -115,7 +116,8 @@ All environment variables, all optional except the API key:
 | `OPENROUTER_API_KEY` | *(none — conductor disabled)* | The only required secret. Without it, the bot still creates/observes instances but never steers, marks done, or raises tasks. |
 | `OPENROUTER_MODEL` | `openai/gpt-5.6-sol` | Conductor's own decision-making model. Overridable per-run in Settings. |
 | `MAZZ_FLUX_INSTANCE_MODEL` | `openai/gpt-5.6-sol` | Model used by spawned vape instances. Also overridable in Settings. |
-| `PORT` | `4270` | HTTP port. |
+| `MAZZ_FLUX_PUBLIC_BASE_URL` | auto-detected in VAPE | Public bot URL embedded in new workers' live-context instructions. Also overridable in Settings. |
+| `PORT` | `4270` | HTTP port and the port used when auto-deriving the public preview URL. |
 | `MAZZ_FLUX_DATA_DIR` | `../mazz-flux-bot-state` | Where all project/note/memory files live. |
 | `MAZZ_FLUX_LIVE` | live by default | Set `0`/`false` to dry-run every mutating vape call (logged, not fired). |
 | `HEARTBEAT_SCAN_INTERVAL_SECS` | `15` | How often the outer loop checks which projects are due (each project's own cadence is separate, see below). |
@@ -152,6 +154,7 @@ curl localhost:4270/api/projects/<id>/memory                     # what the cond
 |---|---|---|
 | `GET/POST` | `/api/projects` | List / create projects |
 | `GET/DELETE` | `/api/projects/{id}` | Fetch / delete a project |
+| `GET` | `/api/projects/{id}/agent-context` | Read-only project, Kanban, and archetype context for its worker |
 | `POST` | `/api/projects/{id}/start` \| `/pause` | Toggle the heartbeat |
 | `POST` | `/api/projects/{id}/message` | Manually send a chat message, bypassing the conductor |
 | `POST` | `/api/projects/{id}/goal` \| `/heartbeat-prompt` | Edit either prompt |
@@ -164,7 +167,7 @@ curl localhost:4270/api/projects/<id>/memory                     # what the cond
 | `GET` | `/api/log` | Action log, global or `?project_id=` scoped |
 | `GET` | `/api/instances`, `/api/instances/{id}`, `/status`, `/session` | Read-through to vape-manager |
 | `GET/PUT/DELETE` | `/api/files?path=` | Browse/edit/delete anything under the state directory |
-| `GET/POST` | `/api/settings` | Conductor/instance model selection |
+| `GET/POST` | `/api/settings` | Model selection and public bot URL override |
 | `POST` | `/api/state/commit` | Snapshot (and push, if configured) the state repo |
 
 ## Development

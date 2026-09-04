@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let api_routes = Router::new()
         .route("/api/projects", get(api::list_projects).post(api::create_project))
         .route("/api/projects/{id}", get(api::get_project).delete(api::delete_project))
+        .route("/api/projects/{id}/agent-context", get(api::get_agent_context))
         .route("/api/projects/{id}/start", post(api::start_project))
         .route("/api/projects/{id}/pause", post(api::pause_project))
         .route("/api/projects/{id}/message", post(api::send_project_message))
@@ -106,7 +107,10 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(4270);
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(mazz_flux_bot::public_url::DEFAULT_PORT);
     // 0.0.0.0 (not 127.0.0.1) so the port is reachable from outside the pod
     // when this runs inside a vape/flux instance — vape's port-detection
     // exposes it as a Link on the dashboard. Still fine on a laptop.

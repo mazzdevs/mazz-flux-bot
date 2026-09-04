@@ -687,9 +687,11 @@ dependencies = [
  "spice-framework",
  "thiserror 1.0.69",
  "tokio",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
