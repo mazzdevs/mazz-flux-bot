@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>mazz-flux-bot — project</title>
-  <link rel="stylesheet" href="/style.css?v=3" />
+  <link rel="stylesheet" href="/style.css?v=4" />
   <script>
     (function () {
       var saved = localStorage.getItem("mfb-theme");
@@ -47,6 +47,16 @@
       <h2><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> Overview</h2>
       <table class="kv">
         <tbody>
+          <tr>
+            <th>Project name</th>
+            <td>
+              <form id="name-form" class="inline-form">
+                <input type="text" id="name-input" maxlength="120" aria-label="Project name" required />
+                <button type="submit" class="btn-secondary">Save</button>
+                <span id="name-status" class="files-status" role="status"></span>
+              </form>
+            </td>
+          </tr>
           <tr><th>Status</th><td id="ov-status"></td></tr>
           <tr><th>Constellation</th><td id="ov-constellation"></td></tr>
           <tr><th>Instance</th><td id="ov-instance"></td></tr>
@@ -160,6 +170,6 @@
   </main>
 
   <script src="/theme.js"></script>
-  <script src="/project.js?v=4"></script>
+  <script src="/project.js?v=5"></script>
 </body>
 </html>
