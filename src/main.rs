@@ -94,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/heartbeat/status", get(api::heartbeat_status))
         .route("/api/projects/{id}/heartbeat/force", post(api::force_heartbeat))
         .route("/api/projects/{id}/heartbeat-interval", post(api::set_heartbeat_interval))
+        .route("/api/projects/{id}/name", post(api::set_project_name))
         .route("/api/projects/{id}/goal", post(api::set_goal))
         .route("/api/projects/{id}/heartbeat-prompt", post(api::set_heartbeat_prompt))
         .route("/api/projects/{id}/memory", get(api::get_memory))

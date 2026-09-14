@@ -157,6 +157,7 @@ curl localhost:4270/api/projects/<id>/memory                     # what the cond
 | `GET` | `/api/projects/{id}/agent-context` | Read-only project, Kanban, and archetype context for its worker |
 | `POST` | `/api/projects/{id}/start` \| `/pause` | Toggle the heartbeat |
 | `POST` | `/api/projects/{id}/message` | Manually send a chat message, bypassing the conductor |
+| `POST` | `/api/projects/{id}/name` | Rename the project |
 | `POST` | `/api/projects/{id}/goal` \| `/heartbeat-prompt` | Edit either prompt |
 | `POST` | `/api/projects/{id}/heartbeat-interval` | Per-project cadence, in seconds |
 | `POST` | `/api/projects/{id}/heartbeat/force` | Run one tick right now |
