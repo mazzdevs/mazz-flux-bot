@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>mazz-flux-bot</title>
-  <link rel="stylesheet" href="/style.css?v=3" />
+  <link rel="stylesheet" href="/style.css?v=4" />
   <script>
     // Set the theme before first paint to avoid a flash of the wrong theme.
     (function () {
@@ -98,7 +98,10 @@
       <p class="sub" style="margin-top:0.25rem">Direction for periodic check-ins — the conductor composes the actual message, keeping the goal in mind too.</p>
       <div class="dialog-actions">
         <button type="button" id="create-close" class="btn-secondary">Cancel</button>
-        <button type="submit" class="btn">Create</button>
+        <button type="submit" id="create-submit" class="btn">
+          <span class="button-spinner" aria-hidden="true"></span>
+          <span id="create-submit-label">Create</span>
+        </button>
       </div>
     </form>
   </dialog>
@@ -229,7 +232,7 @@
   </main>
 
   <script src="/theme.js"></script>
-  <script src="/app.js?v=3"></script>
+  <script src="/app.js?v=4"></script>
   <script src="/archetypes.js?v=2"></script>
   <script src="/files.js"></script>
 </body>
