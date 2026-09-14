@@ -43,6 +43,10 @@ impl VapeClient {
     async fn auth_token(&self) -> Result<String> {
         let out = Command::new("gh")
             .args(["auth", "token"])
+            // Guardian may inject an ephemeral token that VAPE Manager does
+            // not accept. Read the credential persisted by `gh auth login`.
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
             .output()
             .await
             .context("failed to run `gh auth token` — is the GitHub CLI installed?")?;
