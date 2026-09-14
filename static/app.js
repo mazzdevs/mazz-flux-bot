@@ -163,15 +163,22 @@ bindProjectActions(projectsTiles);
 // ---- Create-project dialog ---------------------------------------------
 
 const createDialog = document.getElementById("create-dialog");
+const createForm = document.getElementById("create-form");
+const createSubmit = document.getElementById("create-submit");
+const createSubmitLabel = document.getElementById("create-submit-label");
+const createClose = document.getElementById("create-close");
+let creatingProject = false;
 
 document.getElementById("create-toggle").addEventListener("click", async () => {
   await loadConstellations();
   createDialog.showModal();
 });
-document.getElementById("create-close").addEventListener("click", () => createDialog.close());
+createClose.addEventListener("click", () => createDialog.close());
 
-document.getElementById("create-form").addEventListener("submit", async (ev) => {
+createForm.addEventListener("submit", async (ev) => {
   ev.preventDefault();
+  if (creatingProject) return;
+
   const name = document.getElementById("name").value.trim();
   const constellation = document.getElementById("constellation").value.trim();
   const goal = document.getElementById("goal").value.trim();
@@ -179,13 +186,28 @@ document.getElementById("create-form").addEventListener("submit", async (ev) => 
   const body = { constellation, goal };
   if (name) body.name = name;
   if (heartbeatPrompt) body.heartbeat_prompt = heartbeatPrompt;
+
+  creatingProject = true;
+  createForm.setAttribute("aria-busy", "true");
+  createSubmit.disabled = true;
+  createSubmit.classList.add("is-loading");
+  createSubmitLabel.textContent = "Creating project…";
+  createClose.disabled = true;
+
   try {
     await api("/api/projects", { method: "POST", body: JSON.stringify(body) });
-    ev.target.reset();
+    createForm.reset();
     createDialog.close();
     await loadProjects();
   } catch (e) {
     alert(e.message);
+  } finally {
+    creatingProject = false;
+    createForm.removeAttribute("aria-busy");
+    createSubmit.disabled = false;
+    createSubmit.classList.remove("is-loading");
+    createSubmitLabel.textContent = "Create";
+    createClose.disabled = false;
   }
 });
 
