@@ -39,34 +39,60 @@ pub async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<serd
 }
 
 pub async fn create_project(State(state): State<AppState>, Json(mut req): Json<CreateProjectRequest>) -> ApiResult<Json<serde_json::Value>> {
-    let (name, name_source) = match req.name.take().filter(|n| !n.trim().is_empty()) {
-        Some(n) => (n, "user_provided"),
-        None => suggest_project_name(&state, &req.goal).await,
+    let should_suggest_name = req.name.as_ref().is_none_or(|name| name.trim().is_empty());
+    let goal = req.goal.clone();
+    let name_source = if should_suggest_name {
+        req.name = Some(format!("project-{}", &Uuid::new_v4().to_string()[..8]));
+        "placeholder_pending"
+    } else {
+        "user_provided"
     };
-    req.name = Some(name);
 
     let project = state.store.create_project(req).await?;
     state
         .store
         .log_action(Some(&project.id), None, "project_created", Some(&json!({"name_source": name_source})), None, None)
         .await?;
-    Ok(Json(json!({ "project": project })))
-}
 
-/// Best-effort LLM-suggested project name for when the create-project form's
-/// name field was left blank. Falls back to a short id-based placeholder on
-/// any failure/empty response — never blocks project creation.
-async fn suggest_project_name(state: &AppState, goal: &str) -> (String, &'static str) {
-    let conductor = conductor::Conductor::from_sources(&state.store).await;
-    if conductor.enabled() {
-        if let Ok(text) = conductor.suggest_project_name(goal).await {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                return (trimmed.to_string(), "llm_suggested");
+    if should_suggest_name {
+        let store = state.store.clone();
+        let project_id = project.id.clone();
+        tokio::spawn(async move {
+            let conductor = conductor::Conductor::from_sources(&store).await;
+            if !conductor.enabled() {
+                return;
             }
-        }
+            let suggestion = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                conductor.suggest_project_name(&goal),
+            )
+            .await;
+            let Ok(Ok(name)) = suggestion else { return };
+            let name = name.trim();
+            if name.is_empty() {
+                return;
+            }
+            if let Err(error) = store.set_project_name(&project_id, name).await {
+                tracing::warn!(%project_id, %error, "failed to apply suggested project name");
+                return;
+            }
+            if let Err(error) = store
+                .log_action(
+                    Some(&project_id),
+                    None,
+                    "project_named",
+                    Some(&json!({"name_source": "llm_suggested"})),
+                    None,
+                    None,
+                )
+                .await
+            {
+                tracing::warn!(%project_id, %error, "failed to log suggested project name");
+            }
+        });
     }
-    (format!("project-{}", &Uuid::new_v4().to_string()[..8]), "placeholder_fallback")
+
+    Ok(Json(json!({ "project": project })))
 }
 
 pub async fn get_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {

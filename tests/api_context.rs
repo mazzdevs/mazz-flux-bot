@@ -22,6 +22,7 @@ async fn test_app() -> (Router, Arc<Store>, std::path::PathBuf) {
         heartbeat_clock: Arc::new(HeartbeatClock::new(15)),
     };
     let app = Router::new()
+        .route("/api/projects", get(api::list_projects).post(api::create_project))
         .route(
             "/api/projects/{id}/agent-context",
             get(api::get_agent_context),
@@ -37,6 +38,34 @@ async fn test_app() -> (Router, Arc<Store>, std::path::PathBuf) {
 async fn json_body(response: axum::response::Response) -> Value {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn unnamed_project_creation_does_not_wait_for_llm_naming() {
+    let (app, _store, _dir) = test_app().await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/projects")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"goal": "Investigate a slow workflow", "constellation": "empty"})
+                .to_string(),
+        ))
+        .unwrap();
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.oneshot(request),
+    )
+    .await
+    .expect("project creation waited for background naming")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(body["project"]["name"]
+        .as_str()
+        .unwrap()
+        .starts_with("project-"));
 }
 
 #[tokio::test]
