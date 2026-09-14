@@ -256,6 +256,11 @@ impl Store {
         self.update_project(id, |p| p.heartbeat_interval_secs = interval_secs).await
     }
 
+    pub async fn set_project_name(&self, id: &str, name: &str) -> Result<()> {
+        let name = name.to_string();
+        self.update_project(id, |p| p.name = name).await
+    }
+
     pub async fn set_goal(&self, id: &str, goal: &str) -> Result<()> {
         let goal = goal.to_string();
         self.update_project(id, |p| p.goal = goal).await
