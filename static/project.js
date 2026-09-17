@@ -51,10 +51,11 @@ function formatRelative(iso) {
 }
 
 function statusClass(status) {
-  if (status === "running") return "status-running";
-  if (status === "error") return "status-error";
-  if (status === "done") return "status-done";
-  if (status === "blocked") return "status-blocked";
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "running") return "status-running";
+  if (["error", "failed", "stopped"].includes(normalized)) return "status-error";
+  if (normalized === "done") return "status-done";
+  if (["blocked", "starting", "stopping", "provisioning"].includes(normalized)) return "status-blocked";
   return "";
 }
 
@@ -78,6 +79,19 @@ async function loadProject() {
   document.getElementById("ov-status").innerHTML = `<span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span>`;
   document.getElementById("ov-constellation").textContent = p.constellation;
   document.getElementById("ov-instance").innerHTML = p.vape_instance_id ? `<code>${escapeHtml(p.vape_instance_id)}</code>` : "none yet";
+
+  const instanceStatus = p.instance_status || (p.vape_instance_id ? "unknown" : "none");
+  const normalizedInstanceStatus = instanceStatus.toLowerCase();
+  const instanceStatusEl = document.getElementById("ov-instance-status");
+  instanceStatusEl.textContent = instanceStatus;
+  instanceStatusEl.className = `status-pill ${statusClass(instanceStatus)}`;
+  instanceStatusEl.title = p.instance_status_source === "unavailable" ? "Live VAPE status unavailable" : "Live VAPE instance status";
+  const canStartInstance = Boolean(p.vape_instance_id) && ["stopped", "failed", "error"].includes(normalizedInstanceStatus);
+  const canStopInstance = Boolean(p.vape_instance_id) && ["running", "starting"].includes(normalizedInstanceStatus);
+  document.getElementById("instance-start").style.display = canStartInstance ? "" : "none";
+  document.getElementById("instance-stop").style.display = canStopInstance ? "" : "none";
+  document.getElementById("instance-lifecycle-actions").style.display = canStartInstance || canStopInstance ? "inline-flex" : "none";
+
   document.getElementById("ov-heartbeat").textContent = p.heartbeat_enabled ? "enabled" : "disabled";
   document.getElementById("ov-last-heartbeat").title = p.last_heartbeat_at || "";
   document.getElementById("ov-last-heartbeat").textContent = formatRelative(p.last_heartbeat_at);
@@ -162,14 +176,26 @@ async function loadInstanceStatus(p) {
     body.textContent = "No instance yet.";
     return;
   }
+  if (p.instance_status_source !== "live") {
+    body.textContent = "Live VAPE instance status is unavailable.";
+    return;
+  }
+  if (String(p.instance_status).toLowerCase() !== "running") {
+    body.textContent = `Instance is ${p.instance_status}. Start it to resume agent status and heartbeats.`;
+    return;
+  }
   try {
-    const { agent_status, pida_status } = await api(`/api/instances/${p.vape_instance_id}/status`);
+    const { agent_status, pida_status, agent_status_error } = await api(`/api/instances/${p.vape_instance_id}/status`);
+    if (!agent_status) {
+      body.textContent = agent_status_error || "The instance is running, but its agent status is not available yet.";
+      return;
+    }
     const { session } = await api(`/api/instances/${p.vape_instance_id}/session`);
     const messages = (session?.messages || []).slice(-6).reverse();
 
     const pidaBits = pida_status
-      ? `ready: ${pida_status.ready} · streaming: ${pida_status.isStreaming} · model: ${escapeHtml(pida_status.model || "?")} · pending question: ${
-          pida_status.pendingAsk ? "yes" : "no"
+      ? `ready: ${pida_status.ready} · streaming: ${pida_status.is_streaming} · model: ${escapeHtml(pida_status.model || "?")} · pending question: ${
+          pida_status.pending_ask ? "yes" : "no"
         }`
       : "(non-pida harness or status unavailable)";
 
@@ -380,6 +406,31 @@ document.getElementById("p-pause").addEventListener("click", async () => {
   await api(`/api/projects/${projectId}/pause`, { method: "POST" });
   await tick();
 });
+
+async function changeInstanceLifecycle(action) {
+  const startButton = document.getElementById("instance-start");
+  const stopButton = document.getElementById("instance-stop");
+  const status = document.getElementById("instance-lifecycle-status");
+  status.classList.remove("error");
+  startButton.disabled = true;
+  stopButton.disabled = true;
+  status.textContent = action === "start" ? "starting…" : "stopping…";
+  try {
+    await api(`/api/projects/${projectId}/instance/${action}`, { method: "POST" });
+    await tick();
+  } catch (error) {
+    status.textContent = error.message;
+    status.classList.add("error");
+  } finally {
+    startButton.disabled = false;
+    stopButton.disabled = false;
+    if (!status.classList.contains("error")) status.textContent = "";
+  }
+}
+
+document.getElementById("instance-start").addEventListener("click", () => changeInstanceLifecycle("start"));
+document.getElementById("instance-stop").addEventListener("click", () => changeInstanceLifecycle("stop"));
+
 document.getElementById("p-delete").addEventListener("click", async () => {
   if (!confirm("Delete this project? (does not delete the vape instance)")) return;
   await api(`/api/projects/${projectId}`, { method: "DELETE" });

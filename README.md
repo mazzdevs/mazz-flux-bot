@@ -26,7 +26,7 @@ Coding agents are great at *doing* work but bad at *staying on task* unattended.
 
 ## Features
 
-- **One instance per project.** Give it a goal, it spins up a real `pida`-harness VAPE instance and manages the whole lifecycle.
+- **One instance per project.** Give it a goal, it spins up a real `pida`-harness VAPE instance and manages the whole lifecycle. Project heartbeat state and VAPE instance state are displayed and controlled independently.
 - **LLM-composed prompts, not templates.** The conductor writes the actual opening message to the agent *in its own words* from your goal — and composes each heartbeat's steering message the same way, informed by your optional **heartbeat prompt** plus its own running memory. Nothing is ever sent to the agent verbatim.
 - **Live context for every worker.** New pida instances receive a project-specific, read-only API URL so they can refresh their project direction, Kanban board, and available archetypes instead of relying on a stale launch-time snapshot.
 - **Persistent, compacted memory.** Every tick, the conductor rewrites a single memory file summarizing everything worth remembering — no unbounded context growth, no re-reading full history every time.
@@ -163,6 +163,7 @@ curl localhost:4270/api/projects/<id>/memory                     # what the cond
 | `POST` | `/api/projects/{id}/heartbeat/force` | Run one tick right now |
 | `GET` | `/api/projects/{id}/notes` \| `/memory` | Conductor's notes / current memory |
 | `POST` | `/api/projects/{id}/instance/rename` | Rename the underlying vape instance |
+| `POST` | `/api/projects/{id}/instance/start` \| `/stop` | Start or stop the underlying VAPE instance without changing project heartbeat state |
 | `GET` | `/api/human-tasks` | Open (or all) human tasks, across every project |
 | `POST` | `/api/human-tasks/{id}/resolve` | Resolve one |
 | `GET` | `/api/log` | Action log, global or `?project_id=` scoped |

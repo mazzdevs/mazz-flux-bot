@@ -30,10 +30,10 @@
       </button>
       <div class="btn-group">
         <button id="p-start" class="btn-secondary" type="button">
-          <svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Start
+          <svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Start project
         </button>
         <button id="p-pause" class="btn-secondary" type="button">
-          <svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Pause
+          <svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Pause project
         </button>
         <button id="p-delete" class="btn-danger" type="button">
           <svg class="icon"><use href="/icons.svg#icon-trash"></use></svg> Delete
@@ -57,9 +57,24 @@
               </form>
             </td>
           </tr>
-          <tr><th>Status</th><td id="ov-status"></td></tr>
+          <tr><th>Project status</th><td id="ov-status"></td></tr>
           <tr><th>Constellation</th><td id="ov-constellation"></td></tr>
           <tr><th>Instance</th><td id="ov-instance"></td></tr>
+          <tr>
+            <th>Instance status</th>
+            <td>
+              <span id="ov-instance-status" class="status-pill">unknown</span>
+              <span id="instance-lifecycle-actions" class="btn-group lifecycle-actions">
+                <button id="instance-start" class="btn-secondary" type="button">
+                  <svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Start instance
+                </button>
+                <button id="instance-stop" class="btn-secondary" type="button">
+                  <svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Stop instance
+                </button>
+              </span>
+              <span id="instance-lifecycle-status" class="files-status" role="status"></span>
+            </td>
+          </tr>
           <tr id="ov-instance-links-row">
             <th>Flux instance</th>
             <td><ul id="ov-instance-links" class="instance-links"></ul></td>
@@ -170,6 +185,6 @@
   </main>
 
   <script src="/theme.js"></script>
-  <script src="/project.js?v=5"></script>
+  <script src="/project.js?v=6"></script>
 </body>
 </html>

@@ -43,10 +43,11 @@ function formatRelative(iso) {
 }
 
 function statusClass(status) {
-  if (status === "running") return "status-running";
-  if (status === "error") return "status-error";
-  if (status === "done") return "status-done";
-  if (status === "blocked") return "status-blocked";
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "running") return "status-running";
+  if (["error", "failed", "stopped"].includes(normalized)) return "status-error";
+  if (normalized === "done") return "status-done";
+  if (["blocked", "starting", "stopping", "provisioning"].includes(normalized)) return "status-blocked";
   return "";
 }
 
@@ -68,12 +69,18 @@ async function loadConstellations() {
 }
 
 function projectActionsHtml(p) {
-  const canStart = p.status !== "running";
-  return `<div class="btn-group">${
-    canStart
-      ? `<button class="btn-secondary" data-act="start" data-id="${p.id}"><svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Start</button>`
-      : `<button class="btn-secondary" data-act="pause" data-id="${p.id}"><svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Pause</button>`
-  }<button class="btn-danger" data-act="delete" data-id="${p.id}"><svg class="icon"><use href="/icons.svg#icon-trash"></use></svg></button></div>`;
+  const canStartProject = p.status !== "running";
+  const instanceStatus = String(p.instance_status || "").toLowerCase();
+  const instanceAction = ["stopped", "failed", "error"].includes(instanceStatus)
+    ? `<button class="btn-secondary" data-act="instance-start" data-id="${p.id}" title="Start Flux instance"><svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Instance</button>`
+    : ["running", "starting"].includes(instanceStatus)
+      ? `<button class="btn-secondary" data-act="instance-stop" data-id="${p.id}" title="Stop Flux instance"><svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Instance</button>`
+      : "";
+  return `<div class="project-action-groups"><div class="btn-group">${
+    canStartProject
+      ? `<button class="btn-secondary" data-act="project-start" data-id="${p.id}" title="Start project heartbeat"><svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Project</button>`
+      : `<button class="btn-secondary" data-act="project-pause" data-id="${p.id}" title="Pause project heartbeat"><svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Project</button>`
+  }</div>${instanceAction ? `<div class="btn-group">${instanceAction}</div>` : ""}<button class="btn-danger" data-act="delete" data-id="${p.id}" title="Delete project"><svg class="icon"><use href="/icons.svg#icon-trash"></use></svg></button></div>`;
 }
 
 async function loadProjects() {
@@ -91,10 +98,12 @@ async function loadProjects() {
       const instanceCell = p.vape_instance_id
         ? `<code>${escapeHtml(p.vape_instance_id)}</code>`
         : `<span class="note">none yet</span>`;
+      const instanceStatus = p.instance_status || (p.vape_instance_id ? "unknown" : "none");
       return `<tr>
         <td><a class="project-link" href="/project.html?id=${p.id}">${escapeHtml(p.name)}</a></td>
         <td><span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span></td>
         <td>${instanceCell}</td>
+        <td><span class="status-pill ${statusClass(instanceStatus)}" title="${p.instance_status_source === "unavailable" ? "Live VAPE status unavailable" : "Live VAPE instance status"}">${escapeHtml(instanceStatus)}</span></td>
         <td class="goal">${escapeHtml(p.goal)}</td>
         <td class="note">${escapeHtml(p.last_note || "")}</td>
         <td>${projectActionsHtml(p)}</td>
@@ -105,6 +114,7 @@ async function loadProjects() {
   projectsTiles.innerHTML = list
     .map((p) => {
       const instance = p.vape_instance_id ? `<code>${escapeHtml(p.vape_instance_id)}</code>` : "none yet";
+      const instanceStatus = p.instance_status || (p.vape_instance_id ? "unknown" : "none");
       const taskCount = taskCounts.get(p.id) || 0;
       const taskLabel = `${taskCount} human task${taskCount === 1 ? "" : "s"}`;
       const taskBadge = taskCount
@@ -119,7 +129,7 @@ async function loadProjects() {
           </div>
         </div>
         <div class="goal">${escapeHtml(p.goal)}</div>
-        <div class="tile-instance">instance: ${instance}</div>
+        <div class="tile-instance">instance: ${instance} <span class="status-pill ${statusClass(instanceStatus)}">${escapeHtml(instanceStatus)}</span></div>
         <div class="note">${escapeHtml(p.last_note || "")}</div>
         <div class="tile-actions">${projectActionsHtml(p)}</div>
       </div>`;
@@ -145,8 +155,10 @@ function bindProjectActions(container) {
     if (!btn) return;
     const { act, id } = btn.dataset;
     try {
-      if (act === "start") await api(`/api/projects/${id}/start`, { method: "POST" });
-      if (act === "pause") await api(`/api/projects/${id}/pause`, { method: "POST" });
+      if (act === "project-start") await api(`/api/projects/${id}/start`, { method: "POST" });
+      if (act === "project-pause") await api(`/api/projects/${id}/pause`, { method: "POST" });
+      if (act === "instance-start") await api(`/api/projects/${id}/instance/start`, { method: "POST" });
+      if (act === "instance-stop") await api(`/api/projects/${id}/instance/stop`, { method: "POST" });
       if (act === "delete") {
         if (!confirm("Delete this project? (does not delete the vape instance)")) return;
         await api(`/api/projects/${id}`, { method: "DELETE" });

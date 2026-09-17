@@ -99,6 +99,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/projects/{id}/heartbeat-prompt", post(api::set_heartbeat_prompt))
         .route("/api/projects/{id}/memory", get(api::get_memory))
         .route("/api/projects/{id}/instance/rename", post(api::rename_instance))
+        .route("/api/projects/{id}/instance/start", post(api::start_project_instance))
+        .route("/api/projects/{id}/instance/stop", post(api::stop_project_instance))
         .route("/api/archetypes", get(api::list_archetypes).post(api::create_archetype))
         .route("/api/archetypes/{slug}", get(api::get_archetype).post(api::update_archetype).delete(api::delete_archetype));
 

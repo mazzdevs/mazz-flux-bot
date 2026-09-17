@@ -226,6 +226,12 @@ pub struct VapeInstance {
     pub labels: HashMap<String, String>,
 }
 
+impl VapeInstance {
+    pub fn is_running(&self) -> bool {
+        self.status.eq_ignore_ascii_case("running")
+    }
+}
+
 /// `GET /api/v1/instances/{id}/agent-status` — tells you which harness (bilda vs
 /// pida) is actually live on this instance. Always check this before building a
 /// harness-scoped proxy path; don't assume "pida" even though that's our default

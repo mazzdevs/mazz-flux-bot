@@ -1,7 +1,7 @@
 //! Serialization coverage for request/response shapes that talk to the real
 //! vape API — catches accidental field drops/renames.
 
-use mazz_flux_bot::models::{CreateInstanceRequest, CreateProjectRequest, JobConfig, KanbanStatus, Project};
+use mazz_flux_bot::models::{CreateInstanceRequest, CreateProjectRequest, JobConfig, KanbanStatus, Project, VapeInstance};
 
 #[test]
 fn job_config_model_field_serializes_when_present() {
@@ -66,4 +66,25 @@ fn project_deserializes_without_heartbeat_prompt_field() {
     let project: Project = serde_json::from_str(old_json).unwrap();
     assert_eq!(project.heartbeat_prompt, None);
     assert_eq!(project.heartbeat_interval_secs, 15 * 60);
+}
+
+#[test]
+fn vape_instance_running_check_is_case_insensitive() {
+    let instance = |status: &str| VapeInstance {
+        id: "abc".into(),
+        name: "worker".into(),
+        status: status.into(),
+        owner: None,
+        constellation: None,
+        created_at: None,
+        urls: vec![],
+        pod_ip: None,
+        ready: false,
+        labels: std::collections::HashMap::new(),
+    };
+
+    assert!(instance("Running").is_running());
+    assert!(instance("running").is_running());
+    assert!(!instance("Stopped").is_running());
+    assert!(!instance("Starting").is_running());
 }

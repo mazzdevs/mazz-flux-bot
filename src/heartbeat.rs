@@ -619,6 +619,22 @@ impl Node<HeartbeatState> for FetchStatusNode {
             message: "fetch_status reached with no instance id".to_string(),
         })?;
 
+        let instance = self
+            .vape
+            .get_instance(instance_id)
+            .await
+            .map_err(node_err("fetch_instance"))?;
+        if !instance.is_running() {
+            let reason = format!(
+                "instance {instance_id} is {}; start the instance to resume agent heartbeats",
+                instance.status.to_lowercase()
+            );
+            return Ok(NodeOutcome::interrupt_with(
+                Update::Noted(reason.clone()),
+                reason,
+            ));
+        }
+
         let agent_status = self.vape.agent_status(instance_id).await.map_err(node_err("fetch_status"))?;
         let harness = agent_status.active_harness.clone().unwrap_or_else(|| "pida".to_string());
 

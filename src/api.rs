@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::conductor;
-use crate::models::{Archetype, CreateProjectRequest, KanbanBoard, KanbanStatus, Project};
+use crate::models::{Archetype, CreateProjectRequest, KanbanBoard, KanbanStatus, Project, VapeInstance};
 use crate::public_url::{self, PublicUrlSource};
 use uuid::Uuid;
 use crate::state_repo;
@@ -33,8 +33,51 @@ type ApiResult<T> = Result<T, AppError>;
 
 // ---- Projects -----------------------------------------------------------
 
+fn project_with_instance_status(
+    project: Project,
+    instance: Option<&VapeInstance>,
+    status_source: &str,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(project)?;
+    let object = value.as_object_mut().expect("Project serializes as an object");
+    object.insert(
+        "instance_status".to_string(),
+        instance
+            .map(|instance| json!(instance.status.clone()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert(
+        "instance_ready".to_string(),
+        instance
+            .map(|instance| json!(instance.ready))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert("instance_status_source".to_string(), json!(status_source));
+    Ok(value)
+}
+
 pub async fn list_projects(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let projects = state.store.list_projects().await?;
+    let (instances, status_source) = match state.vape.list_instances().await {
+        Ok((_, instances)) => (instances, "live"),
+        Err(error) => {
+            tracing::warn!(%error, "could not enrich projects with live instance status");
+            (Vec::new(), "unavailable")
+        }
+    };
+    let instances_by_id: std::collections::HashMap<_, _> =
+        instances.iter().map(|instance| (instance.id.as_str(), instance)).collect();
+    let projects = projects
+        .into_iter()
+        .map(|project| {
+            let instance = project
+                .vape_instance_id
+                .as_deref()
+                .and_then(|id| instances_by_id.get(id).copied());
+            let source = if project.vape_instance_id.is_none() { "none" } else { status_source };
+            project_with_instance_status(project, instance, source)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(json!({ "projects": projects })))
 }
 
@@ -96,10 +139,21 @@ pub async fn create_project(State(state): State<AppState>, Json(mut req): Json<C
 }
 
 pub async fn get_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
-    match state.store.get_project(&id).await? {
-        Some(p) => Ok(Json(json!({ "project": p })).into_response()),
-        None => Ok((StatusCode::NOT_FOUND, Json(json!({"error": "project not found"}))).into_response()),
-    }
+    let Some(project) = state.store.get_project(&id).await? else {
+        return Ok((StatusCode::NOT_FOUND, Json(json!({"error": "project not found"}))).into_response());
+    };
+    let (instance, source) = match project.vape_instance_id.as_deref() {
+        Some(instance_id) => match state.vape.get_instance(instance_id).await {
+            Ok(instance) => (Some(instance), "live"),
+            Err(error) => {
+                tracing::warn!(%error, %instance_id, "could not load live project instance status");
+                (None, "unavailable")
+            }
+        },
+        None => (None, "none"),
+    };
+    let project = project_with_instance_status(project, instance.as_ref(), source)?;
+    Ok(Json(json!({ "project": project })).into_response())
 }
 
 #[derive(Serialize)]
@@ -370,10 +424,99 @@ pub async fn get_instance(State(state): State<AppState>, Path(id): Path<String>)
 }
 
 pub async fn get_instance_status(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
-    let agent_status = state.vape.agent_status(&id).await?;
+    let instance = state.vape.get_instance(&id).await?;
+    if !instance.is_running() {
+        return Ok(Json(json!({
+            "instance": instance,
+            "agent_status": null,
+            "pida_status": null
+        })));
+    }
+
+    let agent_status = match state.vape.agent_status(&id).await {
+        Ok(status) => status,
+        Err(error) => {
+            return Ok(Json(json!({
+                "instance": instance,
+                "agent_status": null,
+                "pida_status": null,
+                "agent_status_error": error.to_string()
+            })));
+        }
+    };
     let harness = agent_status.active_harness.clone().unwrap_or_else(|| "pida".to_string());
     let pida = if harness == "pida" { state.vape.pida_status(&id).await.ok() } else { None };
-    Ok(Json(json!({ "agent_status": agent_status, "pida_status": pida })))
+    Ok(Json(json!({ "instance": instance, "agent_status": agent_status, "pida_status": pida })))
+}
+
+async fn project_instance(
+    state: &AppState,
+    project_id: &str,
+) -> Result<(Project, String), Response> {
+    let project = state
+        .store
+        .get_project(project_id)
+        .await
+        .map_err(|error| AppError(error).into_response())?
+        .ok_or_else(|| {
+            (StatusCode::NOT_FOUND, Json(json!({"error": "project not found"}))).into_response()
+        })?;
+    let instance_id = project.vape_instance_id.clone().ok_or_else(|| {
+        (StatusCode::CONFLICT, Json(json!({"error": "project has no instance yet"}))).into_response()
+    })?;
+    Ok((project, instance_id))
+}
+
+pub async fn start_project_instance(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Response> {
+    let (project, instance_id) = match project_instance(&state, &project_id).await {
+        Ok(value) => value,
+        Err(response) => return Ok(response),
+    };
+    let instance = state.vape.get_instance(&instance_id).await?;
+    let result = if instance.is_running() || instance.status.eq_ignore_ascii_case("starting") {
+        json!({"ok": true, "already_active": true})
+    } else {
+        state.vape.start_instance(&instance_id).await?
+    };
+    state.store.log_action(
+        Some(&project.id),
+        Some(&instance_id),
+        "instance_started",
+        Some(&json!({"previous_status": instance.status})),
+        Some(&result.to_string()),
+        None,
+    ).await?;
+    Ok(Json(json!({ "ok": true, "instance_id": instance_id, "result": result })).into_response())
+}
+
+pub async fn stop_project_instance(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Response> {
+    let (project, instance_id) = match project_instance(&state, &project_id).await {
+        Ok(value) => value,
+        Err(response) => return Ok(response),
+    };
+    let instance = state.vape.get_instance(&instance_id).await?;
+    let result = if instance.status.eq_ignore_ascii_case("stopped")
+        || instance.status.eq_ignore_ascii_case("stopping")
+    {
+        json!({"ok": true, "already_inactive": true})
+    } else {
+        state.vape.stop_instance(&instance_id).await?
+    };
+    state.store.log_action(
+        Some(&project.id),
+        Some(&instance_id),
+        "instance_stopped",
+        Some(&json!({"previous_status": instance.status})),
+        Some(&result.to_string()),
+        None,
+    ).await?;
+    Ok(Json(json!({ "ok": true, "instance_id": instance_id, "result": result })).into_response())
 }
 
 pub async fn get_instance_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
