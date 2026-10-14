@@ -1,175 +1,60 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>mazz-flux-bot — project</title>
-  <link rel="stylesheet" href="/style.css?v=4" />
-  <script>
-    (function () {
-      var saved = localStorage.getItem("mfb-theme");
-      if (saved === "light" || saved === "dark") {
-        document.documentElement.setAttribute("data-theme", saved);
-      }
-    })();
-  </script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Project · mazz-flux-bot</title>
+  <link rel="stylesheet" href="/style.css?v=9">
+  <script>document.documentElement.dataset.theme=localStorage.getItem('mfb-theme')||'light';</script>
 </head>
-<body>
-  <header>
-    <a class="back-link" href="/">
-      <svg class="icon"><use href="/icons.svg#icon-chevron-left"></use></svg> Dashboard
-    </a>
-    <h1 id="project-name">Loading…</h1>
-    <p class="sub" id="project-goal"></p>
-    <div class="header-actions">
-      <button id="theme-toggle" class="btn-icon" type="button" aria-label="Toggle light/dark theme" title="Toggle theme">
-        <svg class="icon" id="theme-icon"><use href="/icons.svg#icon-moon"></use></svg>
-      </button>
-      <button id="p-force-heartbeat" class="btn-secondary" type="button" title="Run a heartbeat tick for this project right now">
-        <svg class="icon"><use href="/icons.svg#icon-refresh"></use></svg> Force heartbeat
-      </button>
-      <div class="btn-group">
-        <button id="p-start" class="btn-secondary" type="button">
-          <svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Start
-        </button>
-        <button id="p-pause" class="btn-secondary" type="button">
-          <svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Pause
-        </button>
-        <button id="p-delete" class="btn-danger" type="button">
-          <svg class="icon"><use href="/icons.svg#icon-trash"></use></svg> Delete
-        </button>
-      </div>
+<body class="project-page">
+  <header class="project-header">
+    <div class="project-breadcrumb"><a class="back-link" href="/">← Projects</a><span>/</span><span>Project workspace</span><button id="theme-toggle" class="btn-icon" aria-label="Toggle theme"><svg class="icon" id="theme-icon"><use href="/icons.svg#icon-moon"></use></svg></button></div>
+    <div class="project-heading"><div><p class="eyebrow">Delivery &amp; execution</p><h1 id="project-name">Loading project…</h1><p id="project-summary" class="sub"></p></div><div id="project-actions" class="editor project-header-actions"></div></div>
+    <div class="project-metrics" aria-label="Project summary">
+      <div class="project-metric"><span>Delivery status</span><strong id="delivery-summary">—</strong><small>Manually managed</small></div>
+      <div class="project-metric"><span>Automation</span><strong id="automation-summary">—</strong><small id="automation-detail">Primary only</small></div>
+      <div class="project-metric"><span>Flux instances</span><strong id="instance-summary">—</strong><small id="instance-detail">Loading health</small></div>
+      <div class="project-metric"><span>Rollout flags</span><strong id="flag-summary">—</strong><small id="flag-detail">Live, read-only values</small></div>
     </div>
   </header>
-
-  <main>
-    <section id="overview">
-      <h2><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> Overview</h2>
-      <table class="kv">
-        <tbody>
-          <tr>
-            <th>Project name</th>
-            <td>
-              <form id="name-form" class="inline-form">
-                <input type="text" id="name-input" maxlength="120" aria-label="Project name" required />
-                <button type="submit" class="btn-secondary">Save</button>
-                <span id="name-status" class="files-status" role="status"></span>
-              </form>
-            </td>
-          </tr>
-          <tr><th>Status</th><td id="ov-status"></td></tr>
-          <tr><th>Constellation</th><td id="ov-constellation"></td></tr>
-          <tr><th>Instance</th><td id="ov-instance"></td></tr>
-          <tr id="ov-instance-links-row">
-            <th>Flux instance</th>
-            <td><ul id="ov-instance-links" class="instance-links"></ul></td>
-          </tr>
-          <tr><th>Heartbeat</th><td id="ov-heartbeat"></td></tr>
-          <tr>
-            <th>Heartbeat interval</th>
-            <td>
-              <form id="interval-form" class="inline-form">
-                <input type="number" id="interval-input" min="1" step="1" />
-                <select id="interval-unit">
-                  <option value="1">seconds</option>
-                  <option value="60">minutes</option>
-                  <option value="3600">hours</option>
-                </select>
-                <button type="submit" class="btn-secondary">Save</button>
-              </form>
-            </td>
-          </tr>
-          <tr><th>Next heartbeat</th><td id="ov-next-heartbeat"></td></tr>
-          <tr><th>Last heartbeat</th><td id="ov-last-heartbeat"></td></tr>
-          <tr><th>Last note</th><td id="ov-last-note"></td></tr>
-          <tr><th>Created</th><td id="ov-created"></td></tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section id="prompts">
-      <h2><svg class="icon"><use href="/icons.svg#icon-note"></use></svg> Prompts</h2>
-
-      <label class="prompt-label">Goal prompt</label>
-      <p class="sub">Direction for the conductor's own opening message to the agent — not sent verbatim.</p>
-      <form id="goal-form" class="prompt-form">
-        <textarea id="goal-input"></textarea>
-        <button type="submit" class="btn-secondary">Save goal</button>
-        <span id="goal-status" class="files-status"></span>
-      </form>
-
-      <label class="prompt-label">Heartbeat prompt (optional)</label>
-      <p class="sub">Direction for periodic check-ins — the conductor composes the actual message, keeping the goal in mind too.</p>
-      <form id="heartbeat-prompt-form" class="prompt-form">
-        <textarea id="heartbeat-prompt-input" placeholder="leave blank to let the conductor use judgment from goal + status alone"></textarea>
-        <button type="submit" class="btn-secondary">Save heartbeat prompt</button>
-        <span id="heartbeat-prompt-status" class="files-status"></span>
-      </form>
-
-      <label class="prompt-label">Memory <span class="sub">(conductor's own compacted summary, overwritten every tick — not editable)</span></label>
-      <pre id="memory-body" class="memory-body">No memory yet.</pre>
-    </section>
-
-    <section id="kanban-section">
-      <div class="section-heading-row">
-        <div>
-          <h2><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> Kanban board</h2>
-          <p class="sub">Work the conductor can assign to the project's coding agent.</p>
+  <main class="project-v2">
+    <div class="workspace-toolbar"><p id="notice" role="status" aria-live="polite"></p><button id="reload-editors" class="btn-secondary" type="button" title="Discard unsaved edits and load the latest saved values">Reload saved values</button></div>
+    <nav class="project-tabs" role="tablist" aria-label="Project sections">
+      <button id="project-tab-overview" type="button" role="tab" data-project-tab="overview" aria-controls="project-panel-overview" aria-selected="true">Overview</button>
+      <button id="project-tab-instances" type="button" role="tab" data-project-tab="instances" aria-controls="project-panel-instances" aria-selected="false" tabindex="-1">Instances</button>
+      <button id="project-tab-work" type="button" role="tab" data-project-tab="work" aria-controls="project-panel-work" aria-selected="false" tabindex="-1">Work</button>
+      <button id="project-tab-activity" type="button" role="tab" data-project-tab="activity" aria-controls="project-panel-activity" aria-selected="false" tabindex="-1">Activity</button>
+    </nav>
+    <div id="project-panel-overview" class="project-panel" role="tabpanel" aria-labelledby="project-tab-overview" tabindex="0">
+      <div class="workspace-grid">
+        <section class="workspace-card"><div class="card-heading"><div><h2>Project details</h2><p>Track the work now. Configure automation when you need it.</p></div></div><div id="metadata" class="editor"></div></section>
+        <div class="workspace-column">
+          <section class="workspace-card"><div class="card-heading"><div><h2>Rollout flags</h2><p>Live LaunchDarkly defaults. Tracking never changes targeting.</p></div></div><div id="flags" class="editor"></div></section>
+          <section class="workspace-card"><div class="card-heading"><div><h2>Related work</h2><p>Keep Jira tickets, EC rollout plans, and VAPE pages together.</p></div></div><div id="links" class="editor"></div></section>
         </div>
-        <button id="kanban-add-toggle" class="btn-secondary" type="button" aria-expanded="false" aria-controls="kanban-add-form">
-          <svg class="icon"><use href="/icons.svg#icon-plus"></use></svg> Add task
-        </button>
+        <section class="workspace-card workspace-wide"><div class="card-heading"><div><h2>Additional notes</h2><p>Decisions, context, and follow-ups that belong to this project.</p></div></div><div id="user-notes" class="editor notes-grid"></div></section>
       </div>
-      <form id="kanban-add-form" class="kanban-add-form" hidden>
-        <label for="kanban-title">Task title</label>
-        <input id="kanban-title" type="text" maxlength="160" placeholder="A concise outcome" required />
-        <label for="kanban-description">Description</label>
-        <textarea id="kanban-description" rows="3" placeholder="Enough context for a coding sub-agent to complete the work"></textarea>
-        <div class="dialog-actions">
-          <button id="kanban-add-cancel" class="btn-secondary" type="button">Cancel</button>
-          <button class="btn" type="submit"><svg class="icon"><use href="/icons.svg#icon-plus"></use></svg> Add to Assigned</button>
-        </div>
-      </form>
-      <div id="kanban-board" class="kanban-board" aria-live="polite">
-        <div class="kanban-column" data-status="assigned">
-          <h3>Assigned <span class="kanban-count" data-count="assigned">0</span></h3>
-          <div class="kanban-task-list" data-list="assigned"></div>
-        </div>
-        <div class="kanban-column" data-status="in_progress">
-          <h3>In Progress <span class="kanban-count" data-count="in_progress">0</span></h3>
-          <div class="kanban-task-list" data-list="in_progress"></div>
-        </div>
-        <div class="kanban-column" data-status="done">
-          <h3>Done <span class="kanban-count" data-count="done">0</span></h3>
-          <div class="kanban-task-list" data-list="done"></div>
-        </div>
+    </div>
+    <div id="project-panel-instances" class="project-panel" role="tabpanel" aria-labelledby="project-tab-instances" tabindex="0" hidden>
+      <section class="workspace-card"><div class="card-heading"><div><h2>Flux instances</h2><p>Only the selected primary receives heartbeat automation. Related instances are manual only.</p></div><button id="open-add-instance" class="btn-secondary" type="button" aria-controls="add-instance-disclosure" aria-expanded="false">Add an instance</button></div><div id="instances" class="editor instance-grid"></div></section>
+      <section class="workspace-card"><details id="add-instance-disclosure"><summary>Add an instance</summary><p class="sub">Attach an existing instance, or configure a new one to provision when ready. Detach never stops or deletes an instance.</p><div id="add-instance" class="editor"></div></details></section>
+    </div>
+    <div id="project-panel-work" class="project-panel" role="tabpanel" aria-labelledby="project-tab-work" tabindex="0" hidden>
+      <section class="workspace-card"><div class="card-heading"><div><h2>Automation · primary only</h2><p>Direction and progress for the selected primary, separate from delivery status.</p></div></div><div id="automation" class="editor"></div></section>
+      <div class="workspace-grid">
+        <section class="workspace-card"><div class="card-heading"><div><h2>Kanban</h2><p>Work assigned through primary automation.</p></div></div><div id="kanban" class="editor task-grid"></div></section>
+        <section class="workspace-card"><div class="card-heading"><div><h2>Human tasks</h2><p>Decisions and blockers that need your attention.</p></div></div><ul id="human-tasks" class="human-tasks-list"></ul></section>
+        <section class="workspace-card"><details><summary>Conductor memory</summary><p class="sub">Compacted automation context. Read-only and rewritten by the conductor.</p><pre id="memory" class="memory-body"></pre></details></section>
+        <section class="workspace-card"><details><summary>Conductor activity notes</summary><p class="sub">Historical observations, separate from your editable notes.</p><ul id="activity-notes" class="notes-list"></ul></details></section>
       </div>
-      <p id="kanban-status" class="files-status" role="status"></p>
-    </section>
-
-    <section id="human-tasks-section">
-      <h2><svg class="icon"><use href="/icons.svg#icon-alert"></use></svg> Human tasks</h2>
-      <ul id="p-human-tasks" class="human-tasks-list"></ul>
-    </section>
-
-    <section id="notes-section">
-      <h2><svg class="icon"><use href="/icons.svg#icon-note"></use></svg> Notes</h2>
-      <ul id="p-notes" class="notes-list"></ul>
-    </section>
-
-    <section id="heartbeat-activity">
-      <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Heartbeat activity</h2>
-      <p class="sub">Every heartbeat tick for this project logs here, including ticks that took no action.</p>
-      <ul id="p-log" class="log-list"></ul>
-    </section>
-
-    <section id="instance-status">
-      <h2><svg class="icon"><use href="/icons.svg#icon-activity"></use></svg> Live instance status</h2>
-      <div id="instance-status-body" class="sub">No instance yet.</div>
-    </section>
+    </div>
+    <div id="project-panel-activity" class="project-panel" role="tabpanel" aria-labelledby="project-tab-activity" tabindex="0" hidden>
+      <section class="workspace-card"><div class="card-heading"><div><h2>Activity</h2><p>Automation decisions and project changes.</p></div><label class="filter-control">Relationship filter<select id="activity-filter"><option value="">All relationships</option></select></label></div><ul id="activity" class="log-list"></ul></section>
+      <section id="lifecycle-card" class="workspace-card lifecycle-card"><div class="card-heading"><div><h2>Project lifecycle</h2><p>Archive retains metadata, history, and exclusive instance ownership. Permanent purge removes local records only. Real Flux instances are never stopped or deleted.</p></div></div><div id="lifecycle" class="editor"></div></section>
+    </div>
   </main>
-
   <script src="/theme.js"></script>
-  <script src="/project.js?v=5"></script>
+  <script src="/project.js?v=9"></script>
 </body>
 </html>

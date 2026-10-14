@@ -14,14 +14,21 @@
 use async_trait::async_trait;
 use mazz_flux_bot::heartbeat::parse_conductor_response;
 use serde_json::json;
-use spice_framework::{test, AgentConfig, AgentOutput, AgentUnderTest, Runner, RunnerConfig, SpiceError, ToolCall, Turn};
+use spice_framework::{
+    AgentConfig, AgentOutput, AgentUnderTest, Runner, RunnerConfig, SpiceError, ToolCall, Turn,
+    test,
+};
 use std::sync::Arc;
 
 struct ConductorAdapter;
 
 #[async_trait]
 impl AgentUnderTest for ConductorAdapter {
-    async fn run(&self, user_message: &str, _config: &AgentConfig) -> Result<AgentOutput, SpiceError> {
+    async fn run(
+        &self,
+        user_message: &str,
+        _config: &AgentConfig,
+    ) -> Result<AgentOutput, SpiceError> {
         let decision = parse_conductor_response(user_message);
         let note = decision.note.clone().unwrap_or_default();
         let tool_call = ToolCall {
@@ -45,7 +52,13 @@ impl AgentUnderTest for ConductorAdapter {
     }
 
     fn available_tools(&self, _config: &AgentConfig) -> Vec<String> {
-        vec!["wait".to_string(), "send_message".to_string(), "mark_done".to_string(), "mark_error".to_string(), "create_human_task".to_string()]
+        vec![
+            "wait".to_string(),
+            "send_message".to_string(),
+            "mark_done".to_string(),
+            "mark_error".to_string(),
+            "create_human_task".to_string(),
+        ]
     }
 
     fn name(&self) -> &str {
@@ -135,14 +148,22 @@ async fn conductor_response_parsing_is_safe() {
     ];
 
     let suite = spice_framework::suite("heartbeat conductor response parsing", tests);
-    let runner = Runner::new(RunnerConfig { console_output: false, ..Default::default() });
+    let runner = Runner::new(RunnerConfig {
+        console_output: false,
+        ..Default::default()
+    });
     let report = runner.run(suite, Arc::new(ConductorAdapter)).await;
 
     assert_eq!(
-        report.failed, 0,
+        report.failed,
+        0,
         "{} of {} spice tests failed: {:#?}",
         report.failed,
         report.total,
-        report.tests.iter().filter(|t| !t.passed).collect::<Vec<_>>()
+        report
+            .tests
+            .iter()
+            .filter(|t| !t.passed)
+            .collect::<Vec<_>>()
     );
 }

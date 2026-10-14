@@ -22,7 +22,10 @@ async fn test_app() -> (Router, Arc<Store>, std::path::PathBuf) {
         heartbeat_clock: Arc::new(HeartbeatClock::new(15)),
     };
     let app = Router::new()
-        .route("/api/projects", get(api::list_projects).post(api::create_project))
+        .route(
+            "/api/projects",
+            get(api::list_projects).post(api::create_project),
+        )
         .route(
             "/api/projects/{id}/agent-context",
             get(api::get_agent_context),
@@ -49,24 +52,22 @@ async fn unnamed_project_creation_does_not_wait_for_llm_naming() {
         .uri("/api/projects")
         .header("content-type", "application/json")
         .body(Body::from(
-            json!({"goal": "Investigate a slow workflow", "constellation": "empty"})
-                .to_string(),
+            json!({"goal": "Investigate a slow workflow", "constellation": "empty"}).to_string(),
         ))
         .unwrap();
 
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        app.oneshot(request),
-    )
-    .await
-    .expect("project creation waited for background naming")
-    .unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(1), app.oneshot(request))
+        .await
+        .expect("project creation waited for background naming")
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
-    assert!(body["project"]["name"]
-        .as_str()
-        .unwrap()
-        .starts_with("project-"));
+    assert!(
+        body["project"]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("project-")
+    );
 }
 
 #[tokio::test]
@@ -215,7 +216,10 @@ async fn project_name_can_be_updated_with_validation() {
     let response = app.clone().oneshot(rename).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(json_body(response).await["project"]["name"], "Better name");
-    assert_eq!(store.get_project(&project.id).await.unwrap().unwrap().name, "Better name");
+    assert_eq!(
+        store.get_project(&project.id).await.unwrap().unwrap().name,
+        "Better name"
+    );
 
     let empty = Request::builder()
         .method("POST")
@@ -223,7 +227,10 @@ async fn project_name_can_be_updated_with_validation() {
         .header("content-type", "application/json")
         .body(Body::from(json!({"name":"   "}).to_string()))
         .unwrap();
-    assert_eq!(app.clone().oneshot(empty).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        app.clone().oneshot(empty).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
 
     let missing = Request::builder()
         .method("POST")
@@ -231,7 +238,10 @@ async fn project_name_can_be_updated_with_validation() {
         .header("content-type", "application/json")
         .body(Body::from(json!({"name":"New name"}).to_string()))
         .unwrap();
-    assert_eq!(app.oneshot(missing).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.oneshot(missing).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
 
     std::fs::remove_dir_all(dir).ok();
 }

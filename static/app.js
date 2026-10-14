@@ -10,7 +10,7 @@ async function api(path, opts) {
     ...opts,
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `${res.status} ${res.statusText}`);
+  if (!res.ok) throw new Error(body.error?.message || body.error || `${res.status} ${res.statusText}`);
   return body;
 }
 
@@ -43,10 +43,11 @@ function formatRelative(iso) {
 }
 
 function statusClass(status) {
-  if (status === "running") return "status-running";
-  if (status === "error") return "status-error";
-  if (status === "done") return "status-done";
-  if (status === "blocked") return "status-blocked";
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "running") return "status-running";
+  if (["error", "failed", "stopped"].includes(normalized)) return "status-error";
+  if (normalized === "done") return "status-done";
+  if (["blocked", "starting", "stopping", "provisioning"].includes(normalized)) return "status-blocked";
   return "";
 }
 
@@ -68,16 +69,23 @@ async function loadConstellations() {
 }
 
 function projectActionsHtml(p) {
-  const canStart = p.status !== "running";
-  return `<div class="btn-group">${
-    canStart
-      ? `<button class="btn-secondary" data-act="start" data-id="${p.id}"><svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Start</button>`
-      : `<button class="btn-secondary" data-act="pause" data-id="${p.id}"><svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Pause</button>`
-  }<button class="btn-danger" data-act="delete" data-id="${p.id}"><svg class="icon"><use href="/icons.svg#icon-trash"></use></svg></button></div>`;
+  if (p.archived_at) return `<a href="/project.html?id=${encodeURIComponent(p.id)}">Archived · Open to restore</a>`;
+  const canStartProject = !p.automation.heartbeat_enabled;
+  return `<div class="project-action-groups"><div class="btn-group">${
+    canStartProject
+      ? `<button class="btn-secondary" data-act="project-start" data-id="${p.id}" title="Start project heartbeat"><svg class="icon"><use href="/icons.svg#icon-play"></use></svg> Project</button>`
+      : `<button class="btn-secondary" data-act="project-pause" data-id="${p.id}" title="Pause project heartbeat"><svg class="icon"><use href="/icons.svg#icon-pause"></use></svg> Project</button>`
+  }</div><button class="btn-danger" data-act="delete" data-id="${p.id}" title="Archive project"><svg class="icon"><use href="/icons.svg#icon-trash"></use></svg></button></div>`;
+}
+
+function projectLinks(p) {
+  const links = [...p.original_jira_tickets, ...p.ec_tickets].map(l => `<a href="${escapeHtml(l.url)}" target="_blank" rel="noopener">${escapeHtml(l.label || l.key || "Ticket")}</a>`).join(" · ");
+  const flags = p.launchdarkly_flags || [];
+  return `${links} · ${flags.filter(f => f.status?.matches_fully_enabled).length}/${flags.length} flags at target`;
 }
 
 async function loadProjects() {
-  const [{ projects }, { entries }] = await Promise.all([api("/api/projects"), api("/api/human-tasks")]);
+  const [{ projects }, { entries }] = await Promise.all([api(`/api/v2/projects${document.getElementById("show-archived")?.checked ? "?archived=true" : ""}`), api("/api/human-tasks")]);
   const list = projects || [];
   const taskCounts = (entries || [])
     .filter((task) => task.status === "open" && !task.resolved_at)
@@ -88,15 +96,17 @@ async function loadProjects() {
 
   projectsBody.innerHTML = list
     .map((p) => {
-      const instanceCell = p.vape_instance_id
-        ? `<code>${escapeHtml(p.vape_instance_id)}</code>`
-        : `<span class="note">none yet</span>`;
+      const primary = p.instances.find(r => r.is_primary);
+      const instanceCell = `${p.instances.length} instance(s) · ${primary ? escapeHtml(primary.label) : "No primary"}`;
+      const primaryStatus = p.instances.find(r => r.is_primary)?.live;
+      const instanceStatus = `${p.automation.status} · primary ${primaryStatus?.status || "unavailable"}`;
       return `<tr>
         <td><a class="project-link" href="/project.html?id=${p.id}">${escapeHtml(p.name)}</a></td>
-        <td><span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span></td>
+        <td><span class="status-pill ${statusClass(p.status)}">${escapeHtml(({pending:"Pending",in_progress:"In Progress",review:"Review",merged:"Merged",flags_enabled:"Flags Enabled",flags_cleaned:"Flags Cleaned"})[p.status] || p.status)}</span></td>
         <td>${instanceCell}</td>
-        <td class="goal">${escapeHtml(p.goal)}</td>
-        <td class="note">${escapeHtml(p.last_note || "")}</td>
+        <td><span class="status-pill ${statusClass(instanceStatus)}" title="${primaryStatus?.status_source === "unavailable" ? "Live VAPE status unavailable" : "Primary VAPE instance status"}">${escapeHtml(instanceStatus)}</span></td>
+        <td class="goal">${escapeHtml(p.description || p.goal)}<br>${projectLinks(p)}</td>
+        <td class="note">${escapeHtml(p.automation.last_note || "")}</td>
         <td>${projectActionsHtml(p)}</td>
       </tr>`;
     })
@@ -104,7 +114,9 @@ async function loadProjects() {
 
   projectsTiles.innerHTML = list
     .map((p) => {
-      const instance = p.vape_instance_id ? `<code>${escapeHtml(p.vape_instance_id)}</code>` : "none yet";
+      const instance = `${p.instances.length} instance(s) · ${p.instances.filter(r => String(r.live.status).toLowerCase() === "running").length} running`;
+      const primaryStatus = p.instances.find(r => r.is_primary)?.live;
+      const instanceStatus = `${p.automation.status} · primary ${primaryStatus?.status || "unavailable"}`;
       const taskCount = taskCounts.get(p.id) || 0;
       const taskLabel = `${taskCount} human task${taskCount === 1 ? "" : "s"}`;
       const taskBadge = taskCount
@@ -114,13 +126,13 @@ async function loadProjects() {
         <div class="tile-head">
           <a class="project-link" href="/project.html?id=${p.id}"><strong>${escapeHtml(p.name)}</strong></a>
           <div class="tile-badges">
-            <span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span>
+            <span class="status-pill ${statusClass(p.status)}">${escapeHtml(({pending:"Pending",in_progress:"In Progress",review:"Review",merged:"Merged",flags_enabled:"Flags Enabled",flags_cleaned:"Flags Cleaned"})[p.status] || p.status)}</span>
             ${taskBadge}
           </div>
         </div>
-        <div class="goal">${escapeHtml(p.goal)}</div>
-        <div class="tile-instance">instance: ${instance}</div>
-        <div class="note">${escapeHtml(p.last_note || "")}</div>
+        <div class="goal">${escapeHtml(p.description || p.goal)}</div><div>${projectLinks(p)}</div>
+        <div class="tile-instance">instance: ${instance} <span class="status-pill ${statusClass(instanceStatus)}">${escapeHtml(instanceStatus)}</span></div>
+        <div class="note">${escapeHtml(p.automation.last_note || "")}</div>
         <div class="tile-actions">${projectActionsHtml(p)}</div>
       </div>`;
     })
@@ -145,11 +157,14 @@ function bindProjectActions(container) {
     if (!btn) return;
     const { act, id } = btn.dataset;
     try {
-      if (act === "start") await api(`/api/projects/${id}/start`, { method: "POST" });
-      if (act === "pause") await api(`/api/projects/${id}/pause`, { method: "POST" });
+      const { project } = await api(`/api/v2/projects/${id}`);
+      const mutation = { method: "POST", body: JSON.stringify({expected_revision:project.revision}) };
+      if (act === "project-start") await api(`/api/v2/projects/${id}/start`, mutation);
+      if (act === "project-pause") await api(`/api/v2/projects/${id}/pause`, mutation);
+
       if (act === "delete") {
-        if (!confirm("Delete this project? (does not delete the vape instance)")) return;
-        await api(`/api/projects/${id}`, { method: "DELETE" });
+        if (!confirm("Archive this project? All Flux instances are retained.")) return;
+        await api(`/api/v2/projects/${id}/archive`, mutation);
       }
       await loadProjects();
     } catch (e) {
@@ -183,7 +198,7 @@ createForm.addEventListener("submit", async (ev) => {
   const constellation = document.getElementById("constellation").value.trim();
   const goal = document.getElementById("goal").value.trim();
   const heartbeatPrompt = document.getElementById("heartbeat-prompt").value.trim();
-  const body = { constellation, goal };
+  const body = { constellation, goal, description: document.getElementById("description").value, status: document.getElementById("delivery-status").value };
   if (name) body.name = name;
   if (heartbeatPrompt) body.heartbeat_prompt = heartbeatPrompt;
 
@@ -195,7 +210,7 @@ createForm.addEventListener("submit", async (ev) => {
   createClose.disabled = true;
 
   try {
-    await api("/api/projects", { method: "POST", body: JSON.stringify(body) });
+    await api("/api/v2/projects", { method: "POST", body: JSON.stringify(body) });
     createForm.reset();
     createDialog.close();
     await loadProjects();
@@ -239,8 +254,9 @@ async function tick() {
 }
 
 loadConstellations();
+document.getElementById("show-archived")?.addEventListener("change", tick);
 tick();
-setInterval(tick, 5000);
+setInterval(tick, 15000);
 
 // ---- Settings dialog (models + public bot URL; no API keys) ------------
 

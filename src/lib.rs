@@ -1,10 +1,13 @@
 pub mod api;
 pub mod conductor;
 pub mod heartbeat;
+pub mod launchdarkly;
 pub mod models;
+pub mod projects;
 pub mod public_url;
 pub mod state_repo;
 pub mod store;
+pub mod v2;
 pub mod vape_client;
 
 use std::sync::Arc;

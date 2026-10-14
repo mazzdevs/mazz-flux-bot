@@ -21,7 +21,10 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         .await
         .with_context(|| format!("failed to run git {args:?} in {}", cwd.display()))?;
     if !out.status.success() {
-        anyhow::bail!("git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!(
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -39,7 +42,9 @@ async fn is_git_repo(dir: &Path) -> bool {
 ///
 /// Safe to call on every startup — each step is a no-op if already done.
 pub async fn ensure_init(dir: &Path) -> Result<()> {
-    tokio::fs::create_dir_all(dir).await.with_context(|| format!("creating {}", dir.display()))?;
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("creating {}", dir.display()))?;
 
     if !is_git_repo(dir).await {
         git(dir, &["init"]).await?;
@@ -58,7 +63,10 @@ pub async fn ensure_init(dir: &Path) -> Result<()> {
     }
 
     if let Ok(url) = std::env::var("MAZZ_FLUX_STATE_REPO_URL") {
-        let has_remote = git(dir, &["remote"]).await.map(|out| out.lines().any(|l| l == "origin")).unwrap_or(false);
+        let has_remote = git(dir, &["remote"])
+            .await
+            .map(|out| out.lines().any(|l| l == "origin"))
+            .unwrap_or(false);
         if !has_remote {
             git(dir, &["remote", "add", "origin", &url]).await?;
             tracing::info!(url, "added origin remote to state repo");
@@ -89,13 +97,21 @@ pub async fn commit(dir: &Path, message: &str) -> Result<CommitSummary> {
     // `git status --porcelain` is empty when there's nothing staged.
     let status = git(dir, &["status", "--porcelain"]).await?;
     if status.is_empty() {
-        return Ok(CommitSummary { committed: false, message: "nothing to commit".to_string(), sha: None, pushed: false });
+        return Ok(CommitSummary {
+            committed: false,
+            message: "nothing to commit".to_string(),
+            sha: None,
+            pushed: false,
+        });
     }
 
     git(dir, &["commit", "-m", message]).await?;
     let sha = git(dir, &["rev-parse", "HEAD"]).await.ok();
 
-    let has_remote = git(dir, &["remote"]).await.map(|out| out.lines().any(|l| l == "origin")).unwrap_or(false);
+    let has_remote = git(dir, &["remote"])
+        .await
+        .map(|out| out.lines().any(|l| l == "origin"))
+        .unwrap_or(false);
     let mut pushed = false;
     if has_remote {
         let branch = std::env::var("MAZZ_FLUX_STATE_BRANCH").unwrap_or_else(|_| "main".to_string());
@@ -105,5 +121,10 @@ pub async fn commit(dir: &Path, message: &str) -> Result<CommitSummary> {
         }
     }
 
-    Ok(CommitSummary { committed: true, message: message.to_string(), sha, pushed })
+    Ok(CommitSummary {
+        committed: true,
+        message: message.to_string(),
+        sha,
+        pushed,
+    })
 }

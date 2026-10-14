@@ -3,8 +3,7 @@
 //! One tick, one project, one graph run:
 //!
 //! ```text
-//!  route --(no instance)--> create_instance --> END
-//!    \--(has instance)--> fetch_status --(harness != pida)--> END
+//!  fetch_status --(harness != pida)--> END
 //!                              \--(pida)--> decide --> act --> END
 //! ```
 //!
@@ -27,11 +26,11 @@ use metalcraft::*;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
+use crate::AppState;
 use crate::conductor::Conductor;
-use crate::models::{CreateInstanceRequest, JobConfig, KanbanStatus, PidaStatus, Project, ProjectStatus};
+use crate::models::{KanbanStatus, PidaStatus, Project, ProjectStatus};
 use crate::public_url;
 use crate::vape_client::VapeClient;
-use crate::AppState;
 
 /// Default per-project heartbeat cadence (see `Project::heartbeat_interval_secs`) —
 /// 15 minutes, editable per project via `PATCH /api/projects/{id}/heartbeat-interval`.
@@ -55,7 +54,10 @@ pub struct HeartbeatClock {
 
 impl HeartbeatClock {
     pub fn new(interval_secs: u64) -> Self {
-        Self { interval_secs, last_tick_at: std::sync::RwLock::new(chrono::Utc::now()) }
+        Self {
+            interval_secs,
+            last_tick_at: std::sync::RwLock::new(chrono::Utc::now()),
+        }
     }
 
     fn mark(&self) {
@@ -78,8 +80,12 @@ impl HeartbeatClock {
 /// An unparseable timestamp is treated as "due" (fail open — better to tick
 /// an extra time than to silently stop ticking a project forever).
 fn is_due(project: &Project) -> bool {
-    let Some(last) = &project.last_heartbeat_at else { return true };
-    let Ok(last) = chrono::DateTime::parse_from_rfc3339(last) else { return true };
+    let Some(last) = &project.last_heartbeat_at else {
+        return true;
+    };
+    let Ok(last) = chrono::DateTime::parse_from_rfc3339(last) else {
+        return true;
+    };
     let elapsed = chrono::Utc::now().signed_duration_since(last.with_timezone(&chrono::Utc));
     elapsed.num_seconds() >= project.heartbeat_interval_secs as i64
 }
@@ -279,10 +285,9 @@ pub(crate) enum TickOutcome {
 #[derive(Clone)]
 pub(crate) struct HeartbeatState {
     project_id: String,
-    project_name: String,
+    relationship_id: String,
     goal: String,
     heartbeat_prompt: Option<String>,
-    constellation: String,
     vape_instance_id: Option<String>,
     harness: Option<String>,
     pida_status: Option<PidaStatus>,
@@ -303,8 +308,6 @@ pub(crate) struct HeartbeatState {
 }
 
 pub(crate) enum Update {
-    Noop,
-    InstanceCreated(String),
     StatusFetched {
         harness: String,
         pida_status: Option<PidaStatus>,
@@ -325,8 +328,6 @@ impl Reducer for HeartbeatState {
     type Update = Update;
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Noop => {}
-            Update::InstanceCreated(id) => self.vape_instance_id = Some(id),
             Update::StatusFetched {
                 harness,
                 pida_status,
@@ -350,27 +351,13 @@ impl Reducer for HeartbeatState {
 }
 
 fn node_err(node: &'static str) -> impl Fn(anyhow::Error) -> GraphError {
-    move |e| GraphError::Node { node: node.to_string(), message: e.to_string() }
-}
-
-// ---- Nodes ----------------------------------------------------------------
-
-struct RouteNode;
-
-#[async_trait::async_trait]
-impl Node<HeartbeatState> for RouteNode {
-    async fn run(&self, _state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
-        Ok(NodeOutcome::Update(Update::Noop))
+    move |e| GraphError::Node {
+        node: node.to_string(),
+        message: e.to_string(),
     }
 }
 
-/// mazz-flux-bot standardizes on the `pida` harness for every instance it
-/// creates (per project decision) — one instance per project.
-struct CreateInstanceNode {
-    vape: Arc<VapeClient>,
-    conductor: Arc<Conductor>,
-    store: Arc<crate::store::Store>,
-}
+// ---- Nodes ----------------------------------------------------------------
 
 /// Turns a project name into a vape/k8s-safe instance-name slug: lowercase,
 /// anything outside `[a-z0-9-]` becomes `-`, repeated `-` collapse to one,
@@ -407,55 +394,11 @@ pub fn instance_name(project_name: &str, project_id: &str) -> String {
     format!("{slug}-{short}")
 }
 
-/// Best-effort LLM-suggested instance-name slug, run through the same
-/// safety net as the deterministic path (`slugify`) so raw model output is
-/// never trusted as a k8s resource name unsanitized. Any failure (disabled
-/// conductor, network error, empty/unusable response) returns `None` —
-/// callers must fall back to the deterministic scheme, never block instance
-/// creation on this.
-async fn try_llm_slug(conductor: &Conductor, project_name: &str, goal: &str) -> Option<String> {
-    if !conductor.enabled() {
-        return None;
-    }
-    let raw = conductor.suggest_instance_slug(project_name, goal).await.ok()?;
-    let cleaned = slugify(raw.trim());
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned)
-    }
-}
-
-/// Best-effort: asks the conductor to compose the initial session prompt in
-/// its own words (see `Conductor::compose_initial_prompt`). Falls back to
-/// sending `goal` verbatim on any failure/empty response — must never block
-/// instance creation. Returns `(prompt, source)` for logging.
-async fn compose_initial_prompt(
-    conductor: &Conductor,
-    project_name: &str,
-    goal: &str,
-    archetypes_json: Option<&str>,
-    kanban_json: Option<&str>,
-) -> (String, &'static str) {
-    if conductor.enabled() {
-        if let Ok(text) = conductor
-            .compose_initial_prompt(project_name, goal, archetypes_json, kanban_json)
-            .await
-        {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                return (trimmed.to_string(), "llm_composed");
-            }
-        }
-    }
-    (goal.to_string(), "verbatim_goal_fallback")
-}
-
 /// Appends integration metadata after conductor composition without rewriting
 /// any conductor-authored text. The child gets one project-scoped, read-only
 /// endpoint rather than being encouraged to discover the bot's mutation APIs.
 pub fn append_live_agent_context(prompt: &str, project_id: &str, base_url: &str) -> String {
-    let context_url = format!("{base_url}/api/projects/{project_id}/agent-context");
+    let context_url = format!("{base_url}/api/v2/projects/{project_id}/agent-context");
     format!(
         "{prompt}\n\n## Live mazz-flux-bot context\n\n\
 This project is orchestrated by mazz-flux-bot.\n\n\
@@ -475,130 +418,11 @@ pub fn apply_live_agent_context(
     resolution: &public_url::PublicUrlResolution,
 ) -> (String, bool) {
     match resolution.url.as_deref() {
-        Some(base_url) => (append_live_agent_context(&prompt, project_id, base_url), true),
+        Some(base_url) => (
+            append_live_agent_context(&prompt, project_id, base_url),
+            true,
+        ),
         None => (prompt, false),
-    }
-}
-
-#[async_trait::async_trait]
-impl Node<HeartbeatState> for CreateInstanceNode {
-    async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
-        let (name, naming_source) =
-            match try_llm_slug(&self.conductor, &state.project_name, &state.goal).await {
-                Some(slug) => (
-                    format!(
-                        "{slug}-{}",
-                        &state.project_id[..6.min(state.project_id.len())]
-                    ),
-                    "llm_slug",
-                ),
-                None => (
-                    instance_name(&state.project_name, &state.project_id),
-                    "deterministic_slug",
-                ),
-            };
-
-        let model = crate::conductor::resolve_model(
-            &self.store,
-            "instance_model",
-            "MAZZ_FLUX_INSTANCE_MODEL",
-            crate::conductor::DEFAULT_MODEL,
-        )
-        .await;
-        let archetypes = self.store.list_archetypes().await.unwrap_or_default();
-        let archetypes_json = serde_json::to_string(&archetypes).ok();
-        let kanban = self
-            .store
-            .get_kanban_board(&state.project_id)
-            .await
-            .unwrap_or_else(|_| crate::models::KanbanBoard {
-                project_id: state.project_id.clone(),
-                tasks: Vec::new(),
-                updated_at: chrono::Utc::now().to_rfc3339(),
-            });
-        let kanban_json = serde_json::to_string(&kanban).ok();
-        let (composed_prompt, prompt_source) = compose_initial_prompt(
-            &self.conductor,
-            &state.project_name,
-            &state.goal,
-            archetypes_json.as_deref(),
-            kanban_json.as_deref(),
-        )
-        .await;
-        let public_url = public_url::resolve_public_url(&self.store).await;
-        let (prompt, live_context_attached) = apply_live_agent_context(composed_prompt, &state.project_id, &public_url);
-        if !live_context_attached {
-            warn!(project_id = %state.project_id, "bot public URL unavailable; spawning without live agent context");
-        }
-        let _ = self
-            .store
-            .log_action(
-                Some(&state.project_id),
-                None,
-                "instance_live_context",
-                Some(&serde_json::json!({"attached": live_context_attached, "url_source": public_url.source})),
-                None,
-                None,
-            )
-            .await;
-
-        let req = CreateInstanceRequest {
-            name,
-            constellation: state.constellation.clone(),
-            subdomain: None,
-            ticket: None,
-            job: Some(JobConfig {
-                prompt,
-                harness: Some("pida".to_string()),
-                model: Some(model),
-            }),
-            labels: std::collections::HashMap::from([("worker".to_string(), "true".to_string())]),
-        };
-
-        let resp = self
-            .vape
-            .create_instance(&req)
-            .await
-            .map_err(node_err("create_instance"))?;
-
-        let _ = self
-            .store
-            .log_action(
-                Some(&state.project_id),
-                None,
-                "instance_name_chosen",
-                Some(&serde_json::json!({"name": req.name, "source": naming_source})),
-                None,
-                None,
-            )
-            .await;
-        let _ = self
-            .store
-            .log_action(
-                Some(&state.project_id),
-                None,
-                "instance_prompt_composed",
-                Some(&serde_json::json!({"source": prompt_source})),
-                None,
-                None,
-            )
-            .await;
-
-        if resp.get("dry_run").is_some() {
-            return Ok(NodeOutcome::Update(Update::Noted(
-                "dry-run: would create instance (set MAZZ_FLUX_LIVE=0 to force dry-run)"
-                    .to_string(),
-            )));
-        }
-
-        let id = resp
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| GraphError::Node {
-                node: "create_instance".to_string(),
-                message: format!("create_instance response had no id: {resp}"),
-            })?;
-        Ok(NodeOutcome::Update(Update::InstanceCreated(id.to_string())))
     }
 }
 
@@ -614,24 +438,67 @@ struct FetchStatusNode {
 #[async_trait::async_trait]
 impl Node<HeartbeatState> for FetchStatusNode {
     async fn run(&self, state: &HeartbeatState) -> Result<NodeOutcome<Update>> {
-        let instance_id = state.vape_instance_id.as_deref().ok_or_else(|| GraphError::Node {
-            node: "fetch_status".to_string(),
-            message: "fetch_status reached with no instance id".to_string(),
-        })?;
+        let instance_id = state
+            .vape_instance_id
+            .as_deref()
+            .ok_or_else(|| GraphError::Node {
+                node: "fetch_status".to_string(),
+                message: "fetch_status reached with no instance id".to_string(),
+            })?;
 
-        let agent_status = self.vape.agent_status(instance_id).await.map_err(node_err("fetch_status"))?;
-        let harness = agent_status.active_harness.clone().unwrap_or_else(|| "pida".to_string());
-
-        if harness != "pida" {
-            return Ok(NodeOutcome::Update(Update::StatusFetched { harness, pida_status: None, messages: vec![] }));
+        let instance = self
+            .vape
+            .get_instance(instance_id)
+            .await
+            .map_err(node_err("fetch_instance"))?;
+        if !instance.is_running() {
+            let reason = format!(
+                "instance {instance_id} is {}; start the instance to resume agent heartbeats",
+                instance.status.to_lowercase()
+            );
+            return Ok(NodeOutcome::interrupt_with(
+                Update::Noted(reason.clone()),
+                reason,
+            ));
         }
 
-        let pida_status = self.vape.pida_status(instance_id).await.map_err(node_err("fetch_status"))?;
-        let session = self.vape.pida_session(instance_id).await.map_err(node_err("fetch_status"))?;
-        let recent_messages: Vec<serde_json::Value> = session.messages.into_iter().rev().take(6).collect();
+        let agent_status = self
+            .vape
+            .agent_status(instance_id)
+            .await
+            .map_err(node_err("fetch_status"))?;
+        let harness = agent_status
+            .active_harness
+            .clone()
+            .unwrap_or_else(|| "pida".to_string());
+
+        if harness != "pida" {
+            return Ok(NodeOutcome::Update(Update::StatusFetched {
+                harness,
+                pida_status: None,
+                messages: vec![],
+            }));
+        }
+
+        let pida_status = self
+            .vape
+            .pida_status(instance_id)
+            .await
+            .map_err(node_err("fetch_status"))?;
+        let session = self
+            .vape
+            .pida_session(instance_id)
+            .await
+            .map_err(node_err("fetch_status"))?;
+        let recent_messages: Vec<serde_json::Value> =
+            session.messages.into_iter().rev().take(6).collect();
         let pending = pida_status.pending_ask.is_some();
 
-        let update = Update::StatusFetched { harness, pida_status: Some(pida_status), messages: recent_messages };
+        let update = Update::StatusFetched {
+            harness,
+            pida_status: Some(pida_status),
+            messages: recent_messages,
+        };
 
         if pending && !self.conductor.enabled() {
             return Ok(NodeOutcome::interrupt_with(
@@ -682,7 +549,21 @@ impl Node<HeartbeatState> for DecideNode {
             }
         });
 
+        let project_metadata = self
+            .store
+            .get_project(&state.project_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.tracking);
+        let additional_notes = self
+            .store
+            .user_notes(&state.project_id)
+            .await
+            .unwrap_or_default();
         let user = serde_json::json!({
+            "additional_notes": additional_notes,
+            "project_metadata": project_metadata,
             "goal": state.goal,
             "heartbeat_prompt": state.heartbeat_prompt,
             "memory": memory,
@@ -706,6 +587,7 @@ impl Node<HeartbeatState> for DecideNode {
 
 struct ActNode {
     vape: Arc<VapeClient>,
+    store: Arc<crate::store::Store>,
 }
 
 #[async_trait::async_trait]
@@ -742,6 +624,14 @@ impl Node<HeartbeatState> for ActNode {
                             node: "act".to_string(),
                             message: "send_message with no instance id".to_string(),
                         })?;
+                verify_primary(
+                    &self.store,
+                    &state.project_id,
+                    &state.relationship_id,
+                    instance_id,
+                )
+                .await
+                .map_err(node_err("act"))?;
                 self.vape
                     .pida_send(instance_id, &message)
                     .await
@@ -810,30 +700,47 @@ impl Node<HeartbeatState> for ActNode {
 fn loop_guard() -> StepGuard<HeartbeatState> {
     Arc::new(|_state, event| {
         if event.node == event.next {
-            GuardAction::Stop(format!("step guard: node '{}' would repeat itself", event.node))
+            GuardAction::Stop(format!(
+                "step guard: node '{}' would repeat itself",
+                event.node
+            ))
         } else {
             GuardAction::Continue
         }
     })
 }
 
-fn build_graph(vape: Arc<VapeClient>, conductor: Arc<Conductor>, store: Arc<crate::store::Store>) -> CompiledGraph<HeartbeatState> {
+fn build_graph(
+    vape: Arc<VapeClient>,
+    conductor: Arc<Conductor>,
+    store: Arc<crate::store::Store>,
+) -> CompiledGraph<HeartbeatState> {
     Graph::<HeartbeatState>::new()
-        .add_node("route", RouteNode)
-        .add_conditional("route", |s: &HeartbeatState| {
-            if s.vape_instance_id.is_none() { "create_instance".to_string() } else { "fetch_status".to_string() }
-        })
-        .add_node("create_instance", CreateInstanceNode { vape: vape.clone(), conductor: conductor.clone(), store: store.clone() })
-        .add_edge("create_instance", END)
-        .add_node("fetch_status", FetchStatusNode { vape: vape.clone(), conductor: conductor.clone() })
+        .add_node(
+            "fetch_status",
+            FetchStatusNode {
+                vape: vape.clone(),
+                conductor: conductor.clone(),
+            },
+        )
         .add_conditional("fetch_status", |s: &HeartbeatState| {
-            if s.harness.as_deref() == Some("pida") { "decide".to_string() } else { END.to_string() }
+            if s.harness.as_deref() == Some("pida") {
+                "decide".to_string()
+            } else {
+                END.to_string()
+            }
         })
-        .add_node("decide", DecideNode { conductor, store })
+        .add_node(
+            "decide",
+            DecideNode {
+                conductor,
+                store: store.clone(),
+            },
+        )
         .add_edge("decide", "act")
-        .add_node("act", ActNode { vape })
+        .add_node("act", ActNode { vape, store })
         .add_edge("act", END)
-        .set_entry("route")
+        .set_entry("fetch_status")
         .compile()
         .expect("heartbeat graph is statically valid")
 }
@@ -842,7 +749,11 @@ fn build_graph(vape: Arc<VapeClient>, conductor: Arc<Conductor>, store: Arc<crat
 
 pub async fn run(state: AppState) {
     let interval_secs = state.heartbeat_clock.interval_secs;
-    info!(interval_secs, "heartbeat scan loop starting (each project ticks on its own interval, default {}s)", DEFAULT_HEARTBEAT_INTERVAL_SECS);
+    info!(
+        interval_secs,
+        "heartbeat scan loop starting (each project ticks on its own interval, default {}s)",
+        DEFAULT_HEARTBEAT_INTERVAL_SECS
+    );
 
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     loop {
@@ -851,7 +762,9 @@ pub async fn run(state: AppState) {
 
         let conductor = Arc::new(Conductor::from_sources(&state.store).await);
         let graph = build_graph(state.vape.clone(), conductor, state.store.clone());
-        let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
+        let executor = Executor::new(graph)
+            .max_steps(10)
+            .with_step_guard(loop_guard());
 
         if let Err(e) = tick(&state, &executor).await {
             error!(error = %e, "heartbeat tick failed");
@@ -871,13 +784,38 @@ pub async fn run(state: AppState) {
 /// `persist_tick` path, which pushes this project's next-due time forward
 /// by its interval, same as an automatic tick would.
 pub async fn force_tick(state: &AppState, project_id: &str) -> anyhow::Result<()> {
-    let project = state.store.get_project(project_id).await?.ok_or_else(|| anyhow::anyhow!("project {project_id} not found"))?;
+    let project = state
+        .store
+        .get_project(project_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("project {project_id} not found"))?;
 
     let conductor = Arc::new(Conductor::from_sources(&state.store).await);
     let graph = build_graph(state.vape.clone(), conductor, state.store.clone());
-    let executor = Executor::new(graph).max_steps(10).with_step_guard(loop_guard());
+    let executor = Executor::new(graph)
+        .max_steps(10)
+        .with_step_guard(loop_guard());
 
-    process_project(state, &executor, &project).await
+    process_project(state, &executor, &project, true, None)
+        .await
+        .map(|_| ())
+}
+
+pub async fn force_tick_checked(
+    state: &AppState,
+    project_id: &str,
+    revision: u64,
+) -> anyhow::Result<u64> {
+    let project = state.store.require_project(project_id).await?;
+    let conductor = Arc::new(Conductor::from_sources(&state.store).await);
+    let executor = Executor::new(build_graph(
+        state.vape.clone(),
+        conductor,
+        state.store.clone(),
+    ))
+    .max_steps(10)
+    .with_step_guard(loop_guard());
+    process_project(state, &executor, &project, true, Some(revision)).await
 }
 
 async fn tick(state: &AppState, executor: &Executor<HeartbeatState>) -> anyhow::Result<()> {
@@ -886,9 +824,19 @@ async fn tick(state: &AppState, executor: &Executor<HeartbeatState>) -> anyhow::
         if !is_due(&project) {
             continue;
         }
-        if let Err(e) = process_project(state, executor, &project).await {
+        if let Err(e) = process_project(state, executor, &project, false, None).await {
             error!(project_id = %project.id, error = %e, "failed to process project this tick");
-            let _ = state.store.log_action(Some(&project.id), project.vape_instance_id.as_deref(), "heartbeat_error", None, None, Some(&e.to_string())).await;
+            let _ = state
+                .store
+                .log_action(
+                    Some(&project.id),
+                    project.vape_instance_id.as_deref(),
+                    "heartbeat_error",
+                    None,
+                    None,
+                    Some(&e.to_string()),
+                )
+                .await;
         }
     }
     Ok(())
@@ -898,13 +846,36 @@ async fn process_project(
     state: &AppState,
     executor: &Executor<HeartbeatState>,
     project: &Project,
-) -> anyhow::Result<()> {
+    forced: bool,
+    expected_revision: Option<u64>,
+) -> anyhow::Result<u64> {
+    let _guard = state.store.project_guard(&project.id).await?;
+    let mut project = state.store.require_project(&project.id).await?;
+    if let Some(rev) = expected_revision {
+        state.store.check_writable(&project.id, rev).await?;
+    }
+    if project.tracking.archived_at.is_some() {
+        return Err(crate::projects::failure(
+            "archived",
+            "archived projects cannot tick",
+        ));
+    }
+    if !forced && (!project.heartbeat_enabled || project.status != "running" || !is_due(&project)) {
+        return Ok(project.tracking.revision);
+    }
+    let primary = crate::v2::ensure_primary(state, &project.id).await?;
+    project.goal = crate::projects::effective_goal(&project, Some(&primary)).to_string();
+    project.vape_instance_id = primary.vape_instance_id;
+    project.heartbeat_prompt = primary
+        .heartbeat_prompt_override
+        .or(project.heartbeat_prompt);
+    project.constellation = primary.constellation;
+    let project = &project;
     let initial = HeartbeatState {
         project_id: project.id.clone(),
-        project_name: project.name.clone(),
+        relationship_id: primary.id,
         goal: project.goal.clone(),
         heartbeat_prompt: project.heartbeat_prompt.clone(),
-        constellation: project.constellation.clone(),
         vape_instance_id: project.vape_instance_id.clone(),
         harness: None,
         pida_status: None,
@@ -949,7 +920,13 @@ async fn process_project(
                 .await?;
             Ok(())
         }
-    }
+    }?;
+    Ok(state
+        .store
+        .require_project(&project.id)
+        .await?
+        .tracking
+        .revision)
 }
 
 /// Applies conductor-requested board changes in order. Unknown task IDs are
@@ -1049,6 +1026,27 @@ pub async fn apply_kanban_actions(
     Ok(())
 }
 
+async fn verify_primary(
+    store: &crate::store::Store,
+    pid: &str,
+    rid: &str,
+    iid: &str,
+) -> anyhow::Result<()> {
+    let p = store.require_project(pid).await?;
+    let all = store.relationships(pid).await?;
+    if p.tracking.archived_at.is_some()
+        || !all
+            .primary()
+            .is_some_and(|r| r.id == rid && r.vape_instance_id.as_deref() == Some(iid))
+    {
+        return Err(crate::projects::failure(
+            "conflict",
+            "primary changed or project archived during heartbeat",
+        ));
+    }
+    Ok(())
+}
+
 /// Translates one graph run's final state into the durable file store.
 async fn persist_tick(
     state: &AppState,
@@ -1056,48 +1054,9 @@ async fn persist_tick(
     final_state: &HeartbeatState,
     interrupt_reason: Option<String>,
 ) -> anyhow::Result<()> {
-    if project.vape_instance_id.is_none() {
-        if let Some(id) = &final_state.vape_instance_id {
-            state.store.set_project_instance(&project.id, id).await?;
-            state
-                .store
-                .log_action(
-                    Some(&project.id),
-                    Some(id),
-                    "create_instance",
-                    None,
-                    Some(id),
-                    None,
-                )
-                .await?;
-            state
-                .store
-                .touch_heartbeat(&project.id, Some("instance created"))
-                .await?;
-        } else {
-            let note = final_state
-                .note
-                .clone()
-                .unwrap_or_else(|| "create_instance did not return an id".to_string());
-            state
-                .store
-                .log_action(
-                    Some(&project.id),
-                    None,
-                    "create_instance_dry_run",
-                    None,
-                    Some(&note),
-                    None,
-                )
-                .await?;
-            state
-                .store
-                .touch_heartbeat(&project.id, Some(&note))
-                .await?;
-        }
-        return Ok(());
+    if let Some(iid) = project.vape_instance_id.as_deref() {
+        verify_primary(&state.store, &project.id, &final_state.relationship_id, iid).await?;
     }
-
     if let Some(reason) = interrupt_reason {
         state
             .store
