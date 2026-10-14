@@ -581,6 +581,61 @@ async fn migration_inventories_orphan_malformed_and_misnamed_collections() {
     std::fs::remove_dir_all(d).unwrap();
 }
 #[tokio::test]
+async fn legacy_migration_validates_upstream_and_bounds_generated_relationship_ids() {
+    let d = dir();
+    std::fs::create_dir_all(d.join("projects")).unwrap();
+    let original = legacy_record("legacy", Some("bad/id")).to_string();
+    std::fs::write(d.join("projects/legacy.json"), &original).unwrap();
+    let store = Store::open_for_migration(&d).await.unwrap();
+    let report = store.migrate(false).await.unwrap();
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("invalid resource id")),
+        "{:?}",
+        report.errors
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join("projects/legacy.json")).unwrap(),
+        original
+    );
+    assert!(!d.join("project_instances/legacy.json").exists());
+    std::fs::remove_dir_all(d).unwrap();
+
+    let d = dir();
+    std::fs::create_dir_all(d.join("projects")).unwrap();
+    let project_id = "p".repeat(128);
+    std::fs::write(
+        d.join("projects").join(format!("{project_id}.json")),
+        legacy_record(&project_id, Some("valid-instance")).to_string(),
+    )
+    .unwrap();
+    let store = Store::open_for_migration(&d).await.unwrap();
+    let report = store.migrate(false).await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let relationships: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            d.join("project_instances")
+                .join(format!("{project_id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let relationship_id = relationships["primary_instance_relationship_id"]
+        .as_str()
+        .unwrap();
+    assert!(relationship_id.starts_with("legacy-"));
+    assert!(relationship_id.len() <= 128);
+    assert_eq!(
+        relationships["instances"][0]["vape_instance_id"],
+        "valid-instance"
+    );
+    assert!(Store::open(&d).await.is_ok());
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[tokio::test]
 async fn interval_limits_and_non_nullable_patch_contract() {
     let (app, store, d) = app().await;
     for n in [4, 31_536_001, u64::MAX] {

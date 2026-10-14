@@ -491,9 +491,11 @@ impl Store {
                             anyhow::bail!("resumed relationship collection does not preserve the legacy primary instance");
                         }
                     } else if let Some(iid) = &p.vape_instance_id {
+                        validate_id(iid)?;
                         if let Some(owner) = owners.insert(iid.clone(),pid.clone()) { anyhow::bail!("instance {iid} already owned by {owner}"); }
                         let mut r = Relationship::pending(&p,"Primary".into(),p.constellation.clone(),None);
-                        r.id = format!("legacy-{}",p.id);
+                        r.id = legacy_relationship_id(&p.id);
+                        validate_id(&r.id)?;
                         if !relationship_ids.insert(r.id.clone()) { anyhow::bail!("duplicate migrated relationship ID"); }
                         r.vape_instance_id = Some(iid.clone());r.created_by = "legacy-migration".into();
                         r.created_at = p.created_at.clone();r.updated_at = p.updated_at.clone();
@@ -524,6 +526,15 @@ impl Store {
             .sort_by(|a, b| a.project_id.cmp(&b.project_id));
         report.errors.sort();
         Ok(report)
+    }
+}
+
+fn legacy_relationship_id(project_id: &str) -> String {
+    let readable = format!("legacy-{project_id}");
+    if readable.len() <= 128 {
+        readable
+    } else {
+        format!("legacy-{:x}", Sha256::digest(project_id.as_bytes()))
     }
 }
 
