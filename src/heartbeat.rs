@@ -864,8 +864,8 @@ async fn process_project(
         return Ok(project.tracking.revision);
     }
     let primary = crate::v2::ensure_primary(state, &project.id).await?;
+    project.goal = crate::projects::effective_goal(&project, Some(&primary)).to_string();
     project.vape_instance_id = primary.vape_instance_id;
-    project.goal = primary.goal_override.unwrap_or(project.goal);
     project.heartbeat_prompt = primary
         .heartbeat_prompt_override
         .or(project.heartbeat_prompt);

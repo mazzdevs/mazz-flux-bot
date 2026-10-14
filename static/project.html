@@ -1,17 +1,60 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Project · mazz-flux-bot</title><link rel="stylesheet" href="/style.css?v=8"><script>document.documentElement.dataset.theme=localStorage.getItem('mfb-theme')||'light';</script></head>
-<body><header><a href="/">← Dashboard</a><h1 id="project-name">Loading project…</h1><p id="project-summary" class="sub"></p><div class="header-actions"><button id="theme-toggle" class="btn-icon" aria-label="Toggle theme"><svg class="icon" id="theme-icon"><use href="/icons.svg#icon-moon"></use></svg></button></div></header>
-<main class="project-v2"><p id="notice" role="status" aria-live="polite"></p><button id="reload-editors" class="btn-secondary" type="button">Reload saved values (discard unsaved edits)</button>
-<section><h2>Project</h2><div id="metadata" class="editor"></div></section>
-<section><h2>Automation · primary only</h2><div id="automation"></div></section>
-<section><h2>Flux instances</h2><p class="sub">Only the selected primary receives heartbeat automation. Detach never stops or deletes an instance.</p><div id="instances" class="editor"></div><details><summary>Add an instance</summary><div id="add-instance" class="editor"></div></details></section>
-<section><h2>Rollout · LaunchDarkly flags</h2><p class="sub">Live read-only values. Editing tracking never changes LaunchDarkly targeting.</p><div id="flags" class="editor"></div></section>
-<section><h2>Related work</h2><div id="links" class="editor"></div></section>
-<section><h2>Additional notes</h2><div id="user-notes" class="editor"></div></section>
-<section><h2>Kanban · primary automation work</h2><div id="kanban" class="editor"></div></section>
-<section><h2>Human tasks</h2><ul id="human-tasks" class="human-tasks-list"></ul></section>
-<section><h2>Conductor memory</h2><pre id="memory" class="memory-body"></pre></section>
-<section><h2>Conductor activity notes</h2><ul id="activity-notes" class="notes-list"></ul></section>
-<section><h2>Activity</h2><label>Relationship filter <select id="activity-filter"><option value="">All relationships</option></select></label><ul id="activity" class="log-list"></ul></section>
-<section><h2>Project lifecycle</h2><p class="sub">Archive retains metadata, history, and exclusive instance ownership. Permanent purge removes local records only.</p><div id="lifecycle"></div></section>
-</main><script src="/theme.js"></script><script src="/project.js?v=8"></script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Project · mazz-flux-bot</title>
+  <link rel="stylesheet" href="/style.css?v=9">
+  <script>document.documentElement.dataset.theme=localStorage.getItem('mfb-theme')||'light';</script>
+</head>
+<body class="project-page">
+  <header class="project-header">
+    <div class="project-breadcrumb"><a class="back-link" href="/">← Projects</a><span>/</span><span>Project workspace</span><button id="theme-toggle" class="btn-icon" aria-label="Toggle theme"><svg class="icon" id="theme-icon"><use href="/icons.svg#icon-moon"></use></svg></button></div>
+    <div class="project-heading"><div><p class="eyebrow">Delivery &amp; execution</p><h1 id="project-name">Loading project…</h1><p id="project-summary" class="sub"></p></div><div id="project-actions" class="editor project-header-actions"></div></div>
+    <div class="project-metrics" aria-label="Project summary">
+      <div class="project-metric"><span>Delivery status</span><strong id="delivery-summary">—</strong><small>Manually managed</small></div>
+      <div class="project-metric"><span>Automation</span><strong id="automation-summary">—</strong><small id="automation-detail">Primary only</small></div>
+      <div class="project-metric"><span>Flux instances</span><strong id="instance-summary">—</strong><small id="instance-detail">Loading health</small></div>
+      <div class="project-metric"><span>Rollout flags</span><strong id="flag-summary">—</strong><small id="flag-detail">Live, read-only values</small></div>
+    </div>
+  </header>
+  <main class="project-v2">
+    <div class="workspace-toolbar"><p id="notice" role="status" aria-live="polite"></p><button id="reload-editors" class="btn-secondary" type="button" title="Discard unsaved edits and load the latest saved values">Reload saved values</button></div>
+    <nav class="project-tabs" role="tablist" aria-label="Project sections">
+      <button id="project-tab-overview" type="button" role="tab" data-project-tab="overview" aria-controls="project-panel-overview" aria-selected="true">Overview</button>
+      <button id="project-tab-instances" type="button" role="tab" data-project-tab="instances" aria-controls="project-panel-instances" aria-selected="false" tabindex="-1">Instances</button>
+      <button id="project-tab-work" type="button" role="tab" data-project-tab="work" aria-controls="project-panel-work" aria-selected="false" tabindex="-1">Work</button>
+      <button id="project-tab-activity" type="button" role="tab" data-project-tab="activity" aria-controls="project-panel-activity" aria-selected="false" tabindex="-1">Activity</button>
+    </nav>
+    <div id="project-panel-overview" class="project-panel" role="tabpanel" aria-labelledby="project-tab-overview" tabindex="0">
+      <div class="workspace-grid">
+        <section class="workspace-card"><div class="card-heading"><div><h2>Project details</h2><p>Track the work now. Configure automation when you need it.</p></div></div><div id="metadata" class="editor"></div></section>
+        <div class="workspace-column">
+          <section class="workspace-card"><div class="card-heading"><div><h2>Rollout flags</h2><p>Live LaunchDarkly defaults. Tracking never changes targeting.</p></div></div><div id="flags" class="editor"></div></section>
+          <section class="workspace-card"><div class="card-heading"><div><h2>Related work</h2><p>Keep Jira tickets, EC rollout plans, and VAPE pages together.</p></div></div><div id="links" class="editor"></div></section>
+        </div>
+        <section class="workspace-card workspace-wide"><div class="card-heading"><div><h2>Additional notes</h2><p>Decisions, context, and follow-ups that belong to this project.</p></div></div><div id="user-notes" class="editor notes-grid"></div></section>
+      </div>
+    </div>
+    <div id="project-panel-instances" class="project-panel" role="tabpanel" aria-labelledby="project-tab-instances" tabindex="0" hidden>
+      <section class="workspace-card"><div class="card-heading"><div><h2>Flux instances</h2><p>Only the selected primary receives heartbeat automation. Related instances are manual only.</p></div><button id="open-add-instance" class="btn-secondary" type="button" aria-controls="add-instance-disclosure" aria-expanded="false">Add an instance</button></div><div id="instances" class="editor instance-grid"></div></section>
+      <section class="workspace-card"><details id="add-instance-disclosure"><summary>Add an instance</summary><p class="sub">Attach an existing instance, or configure a new one to provision when ready. Detach never stops or deletes an instance.</p><div id="add-instance" class="editor"></div></details></section>
+    </div>
+    <div id="project-panel-work" class="project-panel" role="tabpanel" aria-labelledby="project-tab-work" tabindex="0" hidden>
+      <section class="workspace-card"><div class="card-heading"><div><h2>Automation · primary only</h2><p>Direction and progress for the selected primary, separate from delivery status.</p></div></div><div id="automation" class="editor"></div></section>
+      <div class="workspace-grid">
+        <section class="workspace-card"><div class="card-heading"><div><h2>Kanban</h2><p>Work assigned through primary automation.</p></div></div><div id="kanban" class="editor task-grid"></div></section>
+        <section class="workspace-card"><div class="card-heading"><div><h2>Human tasks</h2><p>Decisions and blockers that need your attention.</p></div></div><ul id="human-tasks" class="human-tasks-list"></ul></section>
+        <section class="workspace-card"><details><summary>Conductor memory</summary><p class="sub">Compacted automation context. Read-only and rewritten by the conductor.</p><pre id="memory" class="memory-body"></pre></details></section>
+        <section class="workspace-card"><details><summary>Conductor activity notes</summary><p class="sub">Historical observations, separate from your editable notes.</p><ul id="activity-notes" class="notes-list"></ul></details></section>
+      </div>
+    </div>
+    <div id="project-panel-activity" class="project-panel" role="tabpanel" aria-labelledby="project-tab-activity" tabindex="0" hidden>
+      <section class="workspace-card"><div class="card-heading"><div><h2>Activity</h2><p>Automation decisions and project changes.</p></div><label class="filter-control">Relationship filter<select id="activity-filter"><option value="">All relationships</option></select></label></div><ul id="activity" class="log-list"></ul></section>
+      <section id="lifecycle-card" class="workspace-card lifecycle-card"><div class="card-heading"><div><h2>Project lifecycle</h2><p>Archive retains metadata, history, and exclusive instance ownership. Permanent purge removes local records only. Real Flux instances are never stopped or deleted.</p></div></div><div id="lifecycle" class="editor"></div></section>
+    </div>
+  </main>
+  <script src="/theme.js"></script>
+  <script src="/project.js?v=9"></script>
+</body>
+</html>

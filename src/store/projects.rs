@@ -108,8 +108,16 @@ impl Store {
         let _lock = self.lock.lock().await;
         let mut p = self.check_writable(id, expected).await?;
         f(&mut p)?;
+        let all = self.relationships(id).await?;
+        Self::pause_without_direction(&mut p, &all);
         self.save_project_revision(&mut p).await?;
         Ok(p)
+    }
+    fn pause_without_direction(p: &mut Project, all: &Relationships) {
+        if p.heartbeat_enabled && effective_goal(p, all.primary()).trim().is_empty() {
+            p.heartbeat_enabled = false;
+            p.status = "paused".into();
+        }
     }
     pub async fn set_archived(&self, id: &str, expected: u64, archived: bool) -> Result<()> {
         let _lock = self.lock.lock().await;
@@ -246,6 +254,7 @@ impl Store {
             write_atomic(&self.memory_path(pid), &memory).await?;
             p.last_heartbeat_at = None;
         }
+        Self::pause_without_direction(&mut p, &all);
         write_json(&self.relationship_path(pid), &all).await?;
         self.save_project_revision(&mut p).await
     }

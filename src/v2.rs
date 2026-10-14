@@ -343,6 +343,7 @@ fn unique_flags(flags: &[FlagReference]) -> anyhow::Result<()> {
 struct Create {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
     goal: String,
     #[serde(default)]
     description: String,
@@ -364,7 +365,6 @@ struct Create {
     launchdarkly_flags: Vec<FlagInput>,
 }
 async fn create(State(state): State<AppState>, Input(req): Input<Create>) -> Result<Json<Value>> {
-    required(&req.goal, "goal")?;
     if let Some(n) = &req.name {
         required(n, "name")?;
         if n.chars().count() > 120 {
@@ -398,7 +398,7 @@ async fn create(State(state): State<AppState>, Input(req): Input<Create>) -> Res
         unique_links(links)?;
     }
     unique_flags(&flags)?;
-    let naming = req.name.is_none();
+    let naming = req.name.is_none() && !req.goal.trim().is_empty();
     let goal = req.goal.clone();
     let p = state
         .store
@@ -499,7 +499,6 @@ async fn patch(
                 p.tracking.description = d;
             }
             if let Some(g) = req.goal {
-                required(&g, "goal")?;
                 p.goal = g;
             }
             if let Some(s) = req.status {
@@ -786,6 +785,11 @@ pub async fn provision(state: &AppState, pid: &str, rid: &str) -> anyhow::Result
     if rel.vape_instance_id.is_some() {
         return Ok(());
     }
+    let p = state.store.require_project(pid).await?;
+    let all = state.store.relationships(pid).await?;
+    let primary = all.primary_instance_relationship_id.as_deref() == Some(rid);
+    let goal = effective_goal(&p, if primary { Some(&rel) } else { None });
+    require_automation_goal(goal)?;
     if !state.vape.live {
         return Err(failure(
             "dry_run",
@@ -821,14 +825,6 @@ pub async fn provision(state: &AppState, pid: &str, rid: &str) -> anyhow::Result
             "prior create may have reached VAPE; no labeled instance found yet. Retry reconciliation later; do not duplicate the request",
         ));
     }
-    let p = state.store.require_project(pid).await?;
-    let all = state.store.relationships(pid).await?;
-    let primary = all.primary_instance_relationship_id.as_deref() == Some(rid);
-    let goal = if primary {
-        rel.goal_override.as_deref().unwrap_or(&p.goal)
-    } else {
-        &p.goal
-    };
     let c = crate::conductor::Conductor::from_sources(&state.store).await;
     let archetypes = serde_json::to_string(&state.store.list_archetypes().await?)?;
     let board = serde_json::to_string(&state.store.get_kanban_board(pid).await?)?;
@@ -924,10 +920,22 @@ pub async fn provision(state: &AppState, pid: &str, rid: &str) -> anyhow::Result
     }
 }
 
+fn require_automation_goal(goal: &str) -> anyhow::Result<()> {
+    if goal.trim().is_empty() {
+        return Err(failure(
+            "validation_error",
+            "Add a project goal or primary goal override before starting automation or provisioning an instance. Tracking does not require a goal.",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn ensure_primary(state: &AppState, pid: &str) -> anyhow::Result<Relationship> {
     let mut all = state.store.relationships(pid).await?;
+    let p = state.store.require_project(pid).await?;
+    let goal = effective_goal(&p, all.primary());
+    require_automation_goal(goal)?;
     if all.instances.is_empty() {
-        let p = state.store.require_project(pid).await?;
         let r = Relationship::pending(&p, "Primary".into(), p.constellation.clone(), None);
         state
             .store

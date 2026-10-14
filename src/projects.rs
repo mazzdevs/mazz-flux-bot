@@ -131,6 +131,15 @@ impl Relationships {
             .and_then(|id| self.instances.iter().find(|r| &r.id == id))
     }
 }
+/// Blank overrides fall back to project direction; heartbeat guidance alone is
+/// not an automation goal.
+pub fn effective_goal<'a>(project: &'a Project, primary: Option<&'a Relationship>) -> &'a str {
+    primary
+        .and_then(|r| r.goal_override.as_deref())
+        .filter(|goal| !goal.trim().is_empty())
+        .unwrap_or(&project.goal)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Automation {
     pub status: String,

@@ -61,29 +61,138 @@ function acknowledge(result,expected,rebaseDirty=true){
   if(rebaseDirty)document.querySelectorAll('form[data-dirty=true]').forEach(form=>{if(Number(form.dataset.revision)===expected)form.dataset.revision=revision;});
   current.revision=Math.max(current.revision,revision);
 }
-function buttons(r){if(current.archived_at)return '';return `<div class="btn-group"><button data-instance="${r.id}" data-action="start">Start instance</button><button data-instance="${r.id}" data-action="stop">Stop instance</button><button data-instance="${r.id}" data-action="rename">Rename</button><button data-instance="${r.id}" data-action="message">Message</button>${!r.is_primary?`<button data-instance="${r.id}" data-action="promote">Make primary</button>`:''}<button data-instance="${r.id}" data-action="detach" class="btn-danger">Detach (retain instance)</button></div>`;}
-function render(){
-  const p=current, disabled=p.archived_at?'disabled':'';
-  el('project-name').textContent=p.name;document.title=`${p.name} · mazz-flux-bot`;
-  el('project-summary').textContent=`${statuses.find(s=>s[0]===p.status)?.[1] || p.status} · ${p.instances.length} instances · ${p.instances.filter(r=>String(r.live.status).toLowerCase()==='running').length} running · ${p.archived_at?'Archived':'Active'}`;
-  editor('metadata',`<form data-form="metadata"><fieldset ${disabled}>${field('name','Project name',p.name)}${area('description','Description',p.description)}<label>Delivery status<select name="status">${options(statuses,p.status)}</select></label>${area('goal','Project goal',p.goal)}${area('heartbeat_prompt','Heartbeat prompt (blank clears)',p.heartbeat_prompt)}${field('constellation','Default constellation',p.constellation)}${field('heartbeat_interval_secs','Heartbeat interval (seconds)',p.automation.heartbeat_interval_secs,'number')}<button>Save project</button></fieldset></form>`);
-  const next=p.automation.last_heartbeat_at?new Date(new Date(p.automation.last_heartbeat_at).getTime()+p.automation.heartbeat_interval_secs*1000).toLocaleString():'Due now';
-  editor('automation',`<p><strong>${esc(p.automation.status)}</strong> · heartbeat ${p.automation.heartbeat_enabled?'enabled':'disabled'} · next ${p.automation.heartbeat_enabled?esc(next):'disabled'}</p><p>${esc(p.automation.last_note)}</p>${p.archived_at?'':`<button data-project-action="${p.automation.heartbeat_enabled?'pause':'start'}">${p.automation.heartbeat_enabled?'Pause project':'Start project'}</button> <button data-project-action="heartbeat/force">Force heartbeat (primary only)</button>`}`);
-  editor('instances',p.instances.map(r=>`<article class="instance-card" data-key="instance-${r.id}"><h3>${esc(r.label)} ${r.is_primary?'<span class="status-pill status-running">Primary</span>':'<span class="status-pill">Related · manual only</span>'}</h3><p>${r.vape_instance_id?`<a target="_blank" rel="noopener" href="https://vape.stable.dexus.io/instances/${encodeURIComponent(r.vape_instance_id)}">${esc(r.vape_instance_id)}</a>`:'Pending provision'} · ${esc(r.live.status || r.live.status_source)} ${esc(r.live.error || r.provision_error || '')}</p>${buttons(r)}${!r.vape_instance_id&&!p.archived_at?`<button data-instance="${r.id}" data-action="provision">Provision / reconcile</button>`:''}<details data-key="config-${r.id}"><summary>Configuration</summary><p class="sub">Constellation/model are launch configuration; editing does not rebuild a running Flux instance.</p><form data-form="instance" data-id="${r.id}"><fieldset ${disabled}>${field('label','Label',r.label)}${field('role','Role',r.role)}${field('constellation','Constellation',r.constellation)}${field('model','Model (blank uses default)',r.model)}${r.is_primary?area('goal_override','Primary goal override',r.goal_override)+area('heartbeat_prompt_override','Primary heartbeat prompt override',r.heartbeat_prompt_override):''}<button>Save configuration</button></fieldset></form></details><details data-key="session-${r.id}" data-session="${r.id}"><summary>Load live session</summary><pre>Open to fetch the latest 20 messages.</pre></details></article>`).join('') || '<p>No instances. Start project to provision a default primary, or attach an existing instance below.</p>');
-  editor('add-instance',`<form data-form="add-instance"><fieldset ${disabled}><label>Mode<select name="mode"><option value="attach">Attach existing</option><option value="provision">Configure new instance</option></select></label>${field('vape_instance_id','Existing VAPE instance ID')}${field('label','Label')}${field('role','Role','worker')}${field('constellation','Constellation',p.constellation)}${field('model','Model (optional)')}<label><input type="checkbox" name="is_primary"> Set primary (only when none exists)</label><button>Add relationship</button></fieldset></form>`);
-  editor('flags',p.launchdarkly_flags.map(f=>resourceForm('launchdarkly-flags',f,`${field('key','Flag key',f.key)}${field('project_key','LD project',f.project_key)}${field('environment_key','Environment',f.environment_key)}<label>Fully enabled target<select name="fully_enabled_value"><option value="true" ${f.fully_enabled_value?'selected':''}>true</option><option value="false" ${!f.fully_enabled_value?'selected':''}>false</option></select></label>${field('label','Label',f.label)}${area('notes','Notes',f.notes)}<p>Current: <strong>${esc(f.status?.available?JSON.stringify(f.status.current_value):'Unavailable')}</strong> · Targeting: ${esc(f.status?.targeting_on ?? 'unknown')} · ${f.status?.matches_fully_enabled?'At target':'Not at target / unknown'}<br>${esc(f.status?.error || '')} ${esc(f.status?.fetched_at || '')}</p>`)).join('')+`<details data-key="add-flag"><summary>Track a flag</summary>${resourceForm('launchdarkly-flags',null,`${field('key','Flag key')}${field('project_key','LD project','default')}${field('environment_key','Environment','production')}<label>Fully enabled target<select name="fully_enabled_value"><option value="true">true</option><option value="false">false</option></select></label>`)}</details>`);
-  editor('links',[['jira-tickets','Original Jira tickets',p.original_jira_tickets],['ec-tickets','EC tickets',p.ec_tickets],['vape-pages','VAPE pages',p.vape_pages]].map(([kind,title,entries])=>`<h3>${title}</h3>${entries.map(l=>`<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label || l.key || l.url)}</a>${resourceForm(kind,l,field('url','HTTPS URL',l.url,'url')+field('key','Ticket key (optional)',l.key)+field('label','Label',l.label))}`).join('')}<details data-key="add-${kind}"><summary>Add ${title.toLowerCase()}</summary>${resourceForm(kind,null,field('url','HTTPS URL','','url')+field('key','Key (optional)')+field('label','Label'))}</details>`).join(''));
-  editor('user-notes',p.additional_notes.map(n=>resourceForm('notes',n,field('title','Title (optional)',n.title)+area('content','Note',n.content)+`<p>Position ${n.position+1} <button type="button" data-note-move="${n.id}" data-step="-1">Move up</button> <button type="button" data-note-move="${n.id}" data-step="1">Move down</button></p>`)).join('')+resourceForm('notes',null,field('title','New note title (optional)')+area('content','New note')));
-  const filter=el('activity-filter'), selected=filter.value;if(filter!==document.activeElement)filter.innerHTML='<option value="">All relationships</option>'+p.instances.map(r=>`<option value="${r.id}">${esc(r.label)}</option>`).join('');filter.value=selected;
-  editor('lifecycle',p.archived_at?'<button data-project-action="restore">Restore (keep paused)</button> <button data-project-action="purge" class="btn-danger">Permanently purge local data</button>':'<button data-project-action="archive" class="btn-secondary">Archive project (retain instances)</button>');
+const projectTabs = [...document.querySelectorAll('[data-project-tab]')];
+const tabStorageKey = `mfb-project-tab:${projectId}`;
+function selectProjectTab(tab, focus = false) {
+  if (!projectTabs.some(button => button.dataset.projectTab === tab)) tab = 'overview';
+  for (const button of projectTabs) {
+    const selected = button.dataset.projectTab === tab;
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    el(button.getAttribute('aria-controls')).hidden = !selected;
+    if (selected && focus) button.focus();
+  }
+  localStorage.setItem(tabStorageKey, tab);
 }
-function resourceForm(kind,item,fields){return `<form data-form="resource" data-kind="${kind}" data-id="${item?.id || ''}" class="resource-form"><fieldset ${current.archived_at?'disabled':''}>${fields}<button>${item?'Save':'Add'}</button>${item?` <button type="button" data-resource-delete="${item.id}" data-kind="${kind}" class="btn-danger">Remove</button>`:''}</fieldset></form>`;}
+projectTabs.forEach(button => {
+  button.addEventListener('click', () => selectProjectTab(button.dataset.projectTab));
+  button.addEventListener('keydown', event => {
+    const index = projectTabs.indexOf(button);
+    let next;
+    if (event.key === 'ArrowRight') next = (index + 1) % projectTabs.length;
+    if (event.key === 'ArrowLeft') next = (index - 1 + projectTabs.length) % projectTabs.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = projectTabs.length - 1;
+    if (next === undefined) return;
+    event.preventDefault();
+    selectProjectTab(projectTabs[next].dataset.projectTab, true);
+  });
+});
+selectProjectTab(localStorage.getItem(tabStorageKey) || 'overview');
+function openWorkspaceEditor(tab, details, field) {
+  selectProjectTab(tab);
+  details.open = true;
+  field.focus({preventScroll: true});
+  const top = window.scrollY + field.getBoundingClientRect().top - document.querySelector('.project-tabs').getBoundingClientRect().height - 16;
+  window.scrollTo({top, behavior: 'auto'});
+}
+el('open-add-instance').addEventListener('click', () => {
+  openWorkspaceEditor('instances', el('add-instance-disclosure'), el('add-instance').querySelector('[name="mode"]'));
+  el('open-add-instance').setAttribute('aria-expanded', 'true');
+});
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-open-goal]');
+  if (!button) return;
+  openWorkspaceEditor('overview', el('automation-direction-settings'), el('metadata').querySelector('[name="goal"]'));
+  button.setAttribute('aria-expanded', 'true');
+});
+document.addEventListener('toggle', event => {
+  if (event.target.id === 'add-instance-disclosure') el('open-add-instance').setAttribute('aria-expanded', String(event.target.open));
+  if (event.target.id === 'automation-direction-settings') document.querySelectorAll('[data-open-goal]').forEach(button => button.setAttribute('aria-expanded', String(event.target.open)));
+}, true);
+function statusClass(status) {
+  const value = String(status || '').toLowerCase();
+  if (['running', 'flags_enabled', 'flags_cleaned'].includes(value)) return 'status-running';
+  if (['blocked', 'starting', 'pending'].includes(value)) return 'status-blocked';
+  if (['failed', 'error'].includes(value)) return 'status-error';
+  if (['done', 'merged', 'review'].includes(value)) return 'status-done';
+  return '';
+}
+function pill(text, status = text) {
+  return `<span class="status-pill ${statusClass(status)}">${esc(text)}</span>`;
+}
+function emptyState(title, text) {
+  return `<div class="workspace-empty"><strong>${esc(title)}</strong><p>${esc(text)}</p></div>`;
+}
+function buttons(r) {
+  if (current.archived_at) return '';
+  const action = (name, label, style = 'btn-secondary') => `<button type="button" class="${style}" data-instance="${r.id}" data-action="${name}">${label}</button>`;
+  return `<div class="instance-actions">${r.vape_instance_id ? action('start', 'Start instance') + action('stop', 'Stop instance') + action('message', 'Message', 'btn') + action('rename', 'Rename') : action('provision', 'Provision / reconcile', 'btn')}${!r.is_primary ? action('promote', 'Make primary') : ''}${action('detach', 'Detach (retain instance)', 'btn-danger')}</div>`;
+}
+function renderInstance(r, disabled) {
+  const health = r.live.status || (r.vape_instance_id ? 'Unavailable' : 'Pending provision');
+  const error = r.live.error || r.provision_error;
+  return `<article class="instance-card ${r.is_primary ? 'instance-primary' : ''}" data-key="instance-${r.id}">
+    <div class="instance-heading"><div><p class="eyebrow">${r.is_primary ? 'Automated primary' : 'Related · manual only'}</p><h3>${esc(r.label)}</h3></div>${pill(health)}</div>
+    <dl class="instance-facts"><div><dt>Role</dt><dd>${esc(r.role)}</dd></div><div><dt>Constellation</dt><dd>${esc(r.constellation)}</dd></div><div><dt>Model</dt><dd>${esc(r.model || 'Default model')}</dd></div></dl>
+    <p class="instance-identity">${r.vape_instance_id ? `<a target="_blank" rel="noopener" href="https://vape.stable.dexus.io/instances/${encodeURIComponent(r.vape_instance_id)}">Open Flux instance ↗ <code>${esc(r.vape_instance_id)}</code></a>` : 'Not provisioned yet. No Flux resources have been created.'}</p>
+    ${error ? `<p class="provider-error">${esc(error)}</p>` : ''}${buttons(r)}
+    <details data-key="config-${r.id}"><summary>Configuration</summary><p class="sub">Constellation/model are launch configuration; editing does not rebuild a running Flux instance.</p><form data-form="instance" data-id="${r.id}"><fieldset ${disabled}><div class="form-grid">${field('label','Label',r.label)}${field('role','Role',r.role)}${field('constellation','Constellation',r.constellation)}${field('model','Model (blank uses default)',r.model)}</div>${r.is_primary ? area('goal_override','Primary goal override (optional)',r.goal_override) + area('heartbeat_prompt_override','Primary heartbeat prompt override (optional)',r.heartbeat_prompt_override) : ''}<div class="form-actions"><button class="btn">Save configuration</button></div></fieldset></form></details>
+    <details data-key="session-${r.id}" data-session="${r.id}"><summary>Load live session</summary><pre>Open to fetch the latest 20 messages.</pre></details>
+  </article>`;
+}
+function renderFlag(f) {
+  const status = f.status;
+  const known = status?.available && status.matches_fully_enabled !== null;
+  const state = known ? (status.matches_fully_enabled ? 'At target' : 'Not at target') : 'Unavailable';
+  return `<div class="tracking-card" data-key="flag-${f.id}"><div class="tracking-heading"><code>${esc(f.key)}</code>${pill(state, known ? (status.matches_fully_enabled ? 'running' : 'blocked') : '')}</div>
+    <div class="flag-values"><span>Current <strong>${esc(status?.available ? JSON.stringify(status.current_value) : 'Unknown')}</strong></span><span>Target <strong>${f.fully_enabled_value}</strong></span><span>Targeting <strong>${status?.targeting_on === true ? 'On' : status?.targeting_on === false ? 'Off' : 'Unknown'}</strong></span></div>
+    <p class="sub">${esc(f.project_key)} / ${esc(f.environment_key)}${status?.fetched_at ? ' · ' + esc(new Date(status.fetched_at).toLocaleTimeString()) : ''}</p>${status?.error ? `<p class="provider-error">${esc(status.error)}</p>` : ''}
+    <details data-key="flag-edit-${f.id}"><summary>Edit tracking</summary>${resourceForm('launchdarkly-flags', f, `${field('key','Flag key',f.key)}<div class="form-grid">${field('project_key','LD project',f.project_key)}${field('environment_key','Environment',f.environment_key)}</div><label>Fully enabled target<select name="fully_enabled_value">${options([['true','true'],['false','false']],String(f.fully_enabled_value))}</select></label>${field('label','Label',f.label)}${area('notes','Notes',f.notes)}`)}</details></div>`;
+}
+function render() {
+  const p = current, disabled = p.archived_at ? 'disabled' : '';
+  const running = p.instances.filter(r => String(r.live.status).toLowerCase() === 'running').length;
+  const atTarget = p.launchdarkly_flags.filter(f => f.status?.matches_fully_enabled === true).length;
+  const primary = p.instances.find(r => r.is_primary);
+  el('project-name').textContent = p.name;
+  document.title = `${p.name} · mazz-flux-bot`;
+  el('project-summary').textContent = p.description || (p.archived_at ? 'Archived project · restore to make changes.' : 'Your delivery context, instances, and rollout in one workspace.');
+  el('delivery-summary').textContent = statuses.find(s => s[0] === p.status)?.[1] || p.status;
+  el('automation-summary').textContent = p.archived_at ? 'Archived' : p.automation.status;
+  el('automation-detail').textContent = p.automation.heartbeat_enabled ? 'Heartbeat enabled · primary only' : 'Heartbeat disabled';
+  el('instance-summary').textContent = String(p.instances.length);
+  el('instance-detail').textContent = `${running} running · ${primary ? 'Primary selected' : 'No primary selected'}`;
+  el('flag-summary').textContent = `${atTarget} / ${p.launchdarkly_flags.length}`;
+  el('flag-detail').textContent = p.launchdarkly_flags.length ? 'At fully enabled target' : 'No flags tracked yet';
+  const effectiveGoal = primary?.goal_override?.trim() || p.goal?.trim();
+  const needsDirection = !effectiveGoal;
+  const prerequisite = needsDirection ? 'disabled aria-describedby="automation-prerequisite"' : '';
+  const directionOpen = el('automation-direction-settings')?.open || false;
+  editor('project-actions', p.archived_at ? '<button class="btn-secondary" data-project-action="restore">Restore project</button>' : `<div class="automation-actions"><button class="btn" data-project-action="${p.automation.heartbeat_enabled ? 'pause' : 'start'}" ${!p.automation.heartbeat_enabled ? prerequisite : ''}>${p.automation.heartbeat_enabled ? 'Pause project' : 'Start project'}</button><button class="btn-secondary" data-project-action="heartbeat/force" ${prerequisite}>Force heartbeat</button></div>${needsDirection ? `<div class="automation-prerequisite"><p id="automation-prerequisite">Tracking only. Add a goal before starting automation.</p><button class="btn-secondary" type="button" data-open-goal aria-controls="automation-direction-settings" aria-expanded="${directionOpen}">Add automation goal</button></div>` : ''}`);
+  editor('metadata', `<form data-form="metadata"><fieldset ${disabled}><div class="form-grid">${field('name','Project name',p.name)}<label>Delivery status<select name="status">${options(statuses,p.status)}</select></label></div>${area('description','Description',p.description)}<details id="automation-direction-settings" data-key="automation-settings"><summary>Automation direction &amp; defaults <span class="optional-label">Optional</span></summary><p class="field-help">Leave the goal blank for tracking-only projects. A goal is needed before automation or new instance provisioning.</p>${area('goal','Project goal (optional)',p.goal)}${area('heartbeat_prompt','Heartbeat prompt (optional; blank clears)',p.heartbeat_prompt)}<div class="form-grid">${field('constellation','Default constellation',p.constellation)}${field('heartbeat_interval_secs','Heartbeat interval (seconds)',p.automation.heartbeat_interval_secs,'number')}</div></details><div class="form-actions"><span class="field-help">Delivery status is never changed by automation.</span><button class="btn">Save project</button></div></fieldset></form>`);
+  const next = p.automation.last_heartbeat_at ? new Date(new Date(p.automation.last_heartbeat_at).getTime() + p.automation.heartbeat_interval_secs * 1000).toLocaleString() : 'Due now';
+  editor('automation', `<div class="automation-overview">${pill(p.automation.status)}<span>Heartbeat ${p.automation.heartbeat_enabled ? 'enabled' : 'disabled'}</span><span>Next: ${p.automation.heartbeat_enabled ? esc(next) : 'Not scheduled'}</span></div><p class="automation-note">${esc(p.automation.last_note || 'No automation activity yet. This project can be used for tracking without a goal.')}</p>`);
+  editor('instances', p.instances.map(r => renderInstance(r,disabled)).join('') || emptyState('No Flux instances yet', 'Attach an existing instance below, or save a goal and Start project to provision a default primary.'));
+  editor('add-instance', `<form data-form="add-instance"><fieldset ${disabled}><div class="form-grid"><label>Mode<select name="mode"><option value="attach">Attach existing</option><option value="provision">Configure new instance</option></select></label>${field('vape_instance_id','Existing VAPE instance ID')}${field('label','Label')}${field('role','Role','worker')}${field('constellation','Constellation',p.constellation)}${field('model','Model (optional)')}</div><label class="checkbox-label"><input type="checkbox" name="is_primary"> Set primary (only when none exists)</label><div class="form-actions"><span class="field-help">Configuring a relationship does not provision it.</span><button class="btn">Add relationship</button></div></fieldset></form>`);
+  editor('flags', (p.launchdarkly_flags.length ? p.launchdarkly_flags.map(renderFlag).join('') : emptyState('No rollout flags tracked', 'Add a flag to compare its live default with your fully enabled target.')) + `<details data-key="add-flag"><summary>Track a flag</summary>${resourceForm('launchdarkly-flags',null,`${field('key','Flag key')}<div class="form-grid">${field('project_key','LD project','default')}${field('environment_key','Environment','production')}</div><label>Fully enabled target<select name="fully_enabled_value"><option value="true">true</option><option value="false">false</option></select></label>`)}</details>`);
+  editor('links', [['jira-tickets','Original Jira tickets',p.original_jira_tickets],['ec-tickets','EC tickets',p.ec_tickets],['vape-pages','VAPE pages',p.vape_pages]].map(([kind,title,entries]) => `<div class="link-group" data-key="group-${kind}"><h3>${title} <span class="count-label">${entries.length}</span></h3>${entries.map(l => `<div class="linked-record" data-key="link-${l.id}"><a class="text-link" href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label || l.key || l.url)} ↗</a><details data-key="link-edit-${l.id}"><summary>Edit link</summary>${resourceForm(kind,l,field('url','HTTPS URL',l.url,'url') + field('key','Ticket key (optional)',l.key) + field('label','Label',l.label))}</details></div>`).join('') || '<p class="field-help">Nothing linked yet.</p>'}<details data-key="add-${kind}"><summary>Add ${title.toLowerCase()}</summary>${resourceForm(kind,null,field('url','HTTPS URL','','url') + field('key','Key (optional)') + field('label','Label'))}</details></div>`).join(''));
+  editor('user-notes', p.additional_notes.map(n => resourceForm('notes',n,field('title','Title (optional)',n.title) + area('content','Note',n.content) + `<div class="note-order"><span class="field-help">Note ${n.position + 1}</span><button class="btn-secondary" type="button" data-note-move="${n.id}" data-step="-1">Move up</button><button class="btn-secondary" type="button" data-note-move="${n.id}" data-step="1">Move down</button></div>`)).join('') + resourceForm('notes',null,field('title','New note title (optional)') + area('content','New note')));
+  const filter = el('activity-filter'), selected = filter.value;
+  if (filter !== document.activeElement) filter.innerHTML = '<option value="">All relationships</option>' + p.instances.map(r => `<option value="${r.id}">${esc(r.label)}</option>`).join('');
+  filter.value = selected;
+  el('lifecycle-card').classList.toggle('lifecycle-danger', Boolean(p.archived_at));
+  editor('lifecycle', p.archived_at ? '<button data-project-action="restore" class="btn-secondary">Restore (keep paused)</button> <button data-project-action="purge" class="btn-danger">Permanently purge local data</button>' : '<button data-project-action="archive" class="btn-secondary">Archive project (retain instances)</button>');
+}
+function resourceForm(kind,item,fields) {
+  return `<form data-form="resource" data-kind="${kind}" data-id="${item?.id || ''}" class="resource-form ${item ? '' : 'resource-new'}"><fieldset ${current.archived_at ? 'disabled' : ''}>${fields}<div class="form-actions"><button class="btn">${item ? 'Save' : 'Add'}</button>${item ? `<button type="button" data-resource-delete="${item.id}" data-kind="${kind}" class="btn-danger">Remove</button>` : ''}</div></fieldset></form>`;
+}
 async function loadExtras(){
   const results=await Promise.allSettled([api(`${base}/kanban`),api(`/api/human-tasks?project_id=${encodeURIComponent(projectId)}&open=false`),api(`${base}/memory`),api(`${base}/activity-notes`),api(`/api/log?project_id=${encodeURIComponent(projectId)}&limit=100`)]);
-  if(results[0].status==='fulfilled'){const tasks=results[0].value.board.tasks;editor('kanban',tasks.map(t=>`<form data-form="task" data-id="${t.id}"><fieldset ${current.archived_at?'disabled':''}>${field('title','Task',t.title)}${area('description','Details',t.description)}<label>Status<select name="status">${options([['assigned','Assigned'],['in_progress','In Progress'],['done','Done']],t.status)}</select></label><button>Save task</button> <button type="button" data-task-delete="${t.id}">Remove task</button></fieldset></form>`).join('')+`<form data-form="task"><fieldset ${current.archived_at?'disabled':''}>${field('title','New task')}${area('description','Details')}<button>Add task</button></fieldset></form>`);}
-  if(results[1].status==='fulfilled')editor('human-tasks',results[1].value.entries.map(t=>`<li><div>${esc(t.description)}<p class="sub">${esc(t.status)}</p></div>${t.status==='open'&&!current.archived_at?`<button data-resolve="${t.id}">Resolve</button>`:''}</li>`).join('') || '<li>No human tasks.</li>');
+  if(results[0].status==='fulfilled'){const tasks=results[0].value.board.tasks;editor('kanban',tasks.map(t=>`<form data-form="task" data-id="${t.id}"><fieldset ${current.archived_at?'disabled':''}>${field('title','Task',t.title)}${area('description','Details',t.description)}<label>Status<select name="status">${options([['assigned','Assigned'],['in_progress','In Progress'],['done','Done']],t.status)}</select></label><button class="btn">Save task</button> <button class="btn-danger" type="button" data-task-delete="${t.id}">Remove task</button></fieldset></form>`).join('')+`<form data-form="task"><fieldset ${current.archived_at?'disabled':''}>${field('title','New task')}${area('description','Details')}<button class="btn">Add task</button></fieldset></form>`);}
+  if(results[1].status==='fulfilled')editor('human-tasks',results[1].value.entries.map(t=>`<li><div>${esc(t.description)}<p class="sub">${esc(t.status)}</p></div>${t.status==='open'&&!current.archived_at?`<button class="btn-secondary" data-resolve="${t.id}">Resolve</button>`:''}</li>`).join('') || '<li>No human tasks.</li>');
   if(results[2].status==='fulfilled')el('memory').textContent=results[2].value.memory || 'No memory yet.';
-  if(results[3].status==='fulfilled')el('activity-notes').innerHTML=results[3].value.notes.map(n=>`<li><small>${esc(n.created_at)}</small><pre>${esc(n.content)}</pre></li>`).join('');
+  if(results[3].status==='fulfilled')el('activity-notes').innerHTML=results[3].value.notes.map(n=>`<li><small>${esc(n.created_at)}</small><pre>${esc(n.content)}</pre></li>`).join('') || '<li class="empty">No conductor notes yet.</li>';
   if(results[4].status==='fulfilled'){activityEntries=results[4].value.entries;renderActivity();}
 }
 function renderActivity(){const rid=el('activity-filter').value,relation=current.instances.find(r=>r.id===rid);el('activity').innerHTML=activityEntries.filter(e=>{if(!rid)return true;let detail={};try{detail=JSON.parse(e.detail || '{}');}catch{}return (relation?.vape_instance_id && e.instance_id===relation.vape_instance_id)||detail.relationship_id===rid;}).map(e=>`<li><strong>${esc(e.action)}</strong> · ${esc(e.instance_id || '')} · ${esc(e.created_at)}<p>${esc(e.error || e.result || '')}</p></li>`).join('');}

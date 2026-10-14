@@ -5997,7 +5997,8 @@
           },
           "goal": {
             "type": "string",
-            "minLength": 1
+            "description": "Optional automation direction. May be empty for tracking-only projects; required before automation or new instance provisioning.",
+            "default": ""
           },
           "description": {
             "type": "string"
@@ -6050,9 +6051,7 @@
             "maxItems": 32
           }
         },
-        "required": [
-          "goal"
-        ],
+        "required": [],
         "additionalProperties": false
       },
       "PatchProject": {
@@ -6065,7 +6064,7 @@
           },
           "goal": {
             "type": "string",
-            "minLength": 1
+            "description": "Optional automation direction. Empty clears the goal. If no nonblank primary override remains, clearing the last direction pauses heartbeat automation; restoring direction requires explicit Start."
           },
           "description": {
             "type": "string"
@@ -6150,7 +6149,7 @@
           },
           "goal": {
             "type": "string",
-            "minLength": 1
+            "description": "Optional automation direction. May be empty for tracking-only projects; required before automation or new instance provisioning."
           },
           "description": {
             "type": "string"
@@ -6345,7 +6344,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "Primary-only optional direction override. Blank or null falls back to project goal. Clearing the last effective direction pauses heartbeat automation; restoring direction does not resume it."
           },
           "heartbeat_prompt_override": {
             "anyOf": [

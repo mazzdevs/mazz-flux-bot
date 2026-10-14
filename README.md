@@ -8,7 +8,7 @@ heartbeat automation. Related instances remain manually controlled.
 
 - Manual delivery status: **Pending, In Progress, Review, Merged, Flags Enabled, Flags Cleaned**.
 - Separate `automation.status`: Draft, Running, Paused, Done, Error, Blocked.
-- Description and overall goal, optional heartbeat guidance.
+- Description, optional automation goal, and optional heartbeat guidance. Projects can be tracking-only.
 - Original Jira tickets, EC tickets, VAPE pages, stable editable notes.
 - LaunchDarkly flag references with live, read-only default value / targeting / target match.
 - Multiple Flux relationships with labels, roles, launch constellation/model, and primary-only goal/prompt overrides.
@@ -33,7 +33,7 @@ trusted VAPE ingress: it is a single-user operator tool, not a multi-tenant auth
 
 ## Automation behavior
 
-1. Start on an empty project creates and provisions a default primary.
+1. With a nonblank effective goal, Start on an empty project creates and provisions a default primary. Without a goal, Start/Force and new-instance provisioning return `422 validation_error` before external calls. A primary goal override can supply the direction; heartbeat guidance alone is not a goal.
 2. Existing relationships without a primary produce `409 missing_primary`; select one explicitly.
 3. A project heartbeat reads the primary's status/transcript, composes a steering decision,
    and acts only on that primary. Related instance transcripts are not polled by heartbeat.
@@ -60,9 +60,9 @@ Contract: [`docs/openapi.json`](docs/openapi.json), also `GET /api/v2/openapi.js
 Runbook: [`docs/multi-instance-projects.md`](docs/multi-instance-projects.md).
 
 ```sh
-# Create metadata; name is optional and generated asynchronously when possible.
+# Create tracking metadata without automation prompts. Name is optional; LLM naming only runs when a nonblank goal is present.
 curl -X POST localhost:4270/api/v2/projects -H 'content-type: application/json' \
-  -d '{"name":"My feature","goal":"Implement and validate the feature","description":"Delivery context","status":"pending"}'
+  -d '{"name":"My feature","description":"Delivery context","status":"pending"}'
 
 # Read the latest revision before every domain mutation.
 curl localhost:4270/api/v2/projects/PROJECT_ID
@@ -145,3 +145,18 @@ MAZZ_FLUX_DATA_DIR=/root/workspace/mazz-flux-bot/target/state-copy \
 Before deployment snapshot state and stop the old writer. Roll back **binary and state together**;
 an old binary can otherwise drop new fields when it rewrites JSON. Only one bot process may
 write a state directory. See the runbook for the full cutover and recovery sequence.
+
+## Project workspace
+
+The show page has remembered Overview, Instances, Work, and Activity tabs with keyboard navigation.
+Overview groups metadata, rollout flags, related links, and notes; Instances keeps targeted controls
+and lazy-loaded sessions together; Work contains Kanban, human tasks, and conductor context.
+Activity separates the filtered audit log from archive/restore/purge. Delivery and automation
+health remain visible in the header. Blank goals can be saved or cleared at any time; creating
+a tracking project, attaching an existing instance, and editing tracking data do not need a goal.
+
+Clearing the last effective goal pauses heartbeat automation in the same project update. A
+nonblank primary override can retain direction when the project goal is cleared. Clearing that
+override pauses if no project goal remains. Saving direction again never resumes automation
+automatically: Start is always explicit. The show-page prerequisite control opens and focuses
+the goal editor; tracking-only projects keep Start and Force disabled until direction is saved.

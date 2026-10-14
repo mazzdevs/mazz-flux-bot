@@ -737,3 +737,346 @@ async fn detached_relationship_detail_is_not_found() {
     );
     std::fs::remove_dir_all(d).unwrap();
 }
+
+#[tokio::test]
+async fn tracking_only_projects_allow_blank_goals_but_automation_requires_direction() {
+    let (app, store, d) = app().await;
+    let (_, contract) = call(&app, "GET", "/api/v2/openapi.json", None).await;
+    assert!(
+        !contract["components"]["schemas"]["CreateProject"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("goal"))
+    );
+    assert!(
+        contract["components"]["schemas"]["PatchProject"]["properties"]["goal"]
+            .get("minLength")
+            .is_none()
+    );
+    for body in [
+        json!({}),
+        json!({"name":"Tracking only","goal":"   ","heartbeat_prompt":""}),
+    ] {
+        let (status, created) = call(&app, "POST", "/api/v2/projects", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let pid = created["project"]["id"].as_str().unwrap();
+        let base = format!("/api/v2/projects/{pid}");
+        let p = store.require_project(pid).await.unwrap();
+        assert!(p.goal.trim().is_empty());
+        assert!(!p.heartbeat_enabled);
+        for action in ["start", "heartbeat/force"] {
+            let (status, error) = call(
+                &app,
+                "POST",
+                &format!("{base}/{action}"),
+                Some(json!({"expected_revision":p.tracking.revision})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+            assert_eq!(error["error"]["code"], "validation_error");
+            assert!(error["error"]["message"].as_str().unwrap().contains("goal"));
+        }
+        assert!(store.relationships(pid).await.unwrap().instances.is_empty());
+        assert_eq!(
+            store.require_project(pid).await.unwrap().tracking.revision,
+            p.tracking.revision
+        );
+
+        // An attached primary can be tracked without direction. Start only
+        // enables automation after the goal is saved; this uses no provider.
+        let mut relationship = Relationship::pending(&p, "Existing".into(), "empty".into(), None);
+        relationship.vape_instance_id = Some(format!("existing-{pid}"));
+        let relationship = store
+            .add_relationship(pid, p.tracking.revision, relationship, true)
+            .await
+            .unwrap();
+        let p = store.require_project(pid).await.unwrap();
+        let (status, saved) = call(
+            &app,
+            "PATCH",
+            &base,
+            Some(json!({"expected_revision":p.tracking.revision,"goal":"Validate the rollout"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let p = store.require_project(pid).await.unwrap();
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                &format!("{base}/start"),
+                Some(json!({"expected_revision":p.tracking.revision}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let p = store.require_project(pid).await.unwrap();
+        assert!(p.heartbeat_enabled);
+        assert_eq!(
+            call(
+                &app,
+                "PATCH",
+                &base,
+                Some(json!({"expected_revision":p.tracking.revision,"goal":""}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let p = store.require_project(pid).await.unwrap();
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                &format!("{base}/start"),
+                Some(json!({"expected_revision":p.tracking.revision}))
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        // An explicit primary override can provide direction independently.
+        store
+            .edit_relationship(pid, &relationship.id, p.tracking.revision, None, |r| {
+                r.goal_override = Some("Review the change".into());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let p = store.require_project(pid).await.unwrap();
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                &format!("{base}/start"),
+                Some(json!({"expected_revision":p.tracking.revision}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let p = store.require_project(pid).await.unwrap();
+        let pending = Relationship::pending(&p, "Related".into(), "empty".into(), None);
+        let pending = store
+            .add_relationship(pid, p.tracking.revision, pending, false)
+            .await
+            .unwrap();
+        let p = store.require_project(pid).await.unwrap();
+        let (status, error) = call(
+            &app,
+            "POST",
+            &format!("{base}/instances/{}/provision", pending.id),
+            Some(json!({"expected_revision":p.tracking.revision})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+        assert_eq!(
+            store.require_project(pid).await.unwrap().tracking.revision,
+            p.tracking.revision
+        );
+    }
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[tokio::test]
+async fn clearing_effective_direction_pauses_automation_until_explicit_start() {
+    let (app, store, d) = app().await;
+    for cleared_override in [Value::Null, json!("   ")] {
+        let p = project(&store).await;
+        let mut rel = Relationship::pending(&p, "Primary".into(), "empty".into(), None);
+        rel.vape_instance_id = Some(format!("existing-{}", p.id));
+        let rel = store
+            .add_relationship(&p.id, p.tracking.revision, rel, true)
+            .await
+            .unwrap();
+        let base = format!("/api/v2/projects/{}", p.id);
+        let instance = format!("{base}/instances/{}", rel.id);
+        let p = store.require_project(&p.id).await.unwrap();
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                &format!("{base}/start"),
+                Some(json!({"expected_revision":p.tracking.revision}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let p = store.require_project(&p.id).await.unwrap();
+        let (status, value) = call(
+            &app,
+            "PATCH",
+            &base,
+            Some(json!({"expected_revision":p.tracking.revision,"goal":"   "})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["project"]["automation"]["heartbeat_enabled"], false);
+        assert_eq!(value["project"]["automation"]["status"], "paused");
+        assert_eq!(value["revision"], p.tracking.revision + 1);
+        assert!(store.list_running_projects().await.unwrap().is_empty());
+        let persisted: Value = serde_json::from_str(
+            &std::fs::read_to_string(d.join("projects").join(format!("{}.json", p.id))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["automation"]["heartbeat_enabled"], false);
+        assert_eq!(persisted["automation"]["status"], "paused");
+
+        let p = store.require_project(&p.id).await.unwrap();
+        assert_eq!(call(&app,"PATCH",&base,Some(json!({"expected_revision":p.tracking.revision,"goal":"Restored project direction"}))).await.0,StatusCode::OK);
+        let p = store.require_project(&p.id).await.unwrap();
+        assert!(!p.heartbeat_enabled);
+        assert_eq!(p.status, "paused");
+        assert!(store.list_running_projects().await.unwrap().is_empty());
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                &format!("{base}/start"),
+                Some(json!({"expected_revision":p.tracking.revision}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let p = store.require_project(&p.id).await.unwrap();
+        assert!(p.heartbeat_enabled);
+        assert_eq!(call(&app,"PATCH",&instance,Some(json!({"expected_revision":p.tracking.revision,"goal_override":"Primary direction"}))).await.0,StatusCode::OK);
+        let p = store.require_project(&p.id).await.unwrap();
+        assert_eq!(
+            call(
+                &app,
+                "PATCH",
+                &base,
+                Some(json!({"expected_revision":p.tracking.revision,"goal":""}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let p = store.require_project(&p.id).await.unwrap();
+        assert!(
+            p.heartbeat_enabled,
+            "primary override should retain direction"
+        );
+        assert_eq!(p.status, "running");
+        assert_eq!(store.list_running_projects().await.unwrap().len(), 1);
+        let (status, value) = call(
+            &app,
+            "PATCH",
+            &instance,
+            Some(json!({"expected_revision":p.tracking.revision,"goal_override":cleared_override})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        let p = store.require_project(&p.id).await.unwrap();
+        assert!(!p.heartbeat_enabled);
+        assert_eq!(p.status, "paused");
+        assert!(store.list_running_projects().await.unwrap().is_empty());
+        assert_eq!(call(&app,"PATCH",&instance,Some(json!({"expected_revision":p.tracking.revision,"goal_override":"Restored primary direction"}))).await.0,StatusCode::OK);
+        let p = store.require_project(&p.id).await.unwrap();
+        assert!(
+            !p.heartbeat_enabled,
+            "restoring an override must not auto-start"
+        );
+        assert!(store.list_running_projects().await.unwrap().is_empty());
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                &format!("{base}/start"),
+                Some(json!({"expected_revision":p.tracking.revision}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let p = store.require_project(&p.id).await.unwrap();
+        assert!(p.heartbeat_enabled);
+        // Keep the next case's due-scan inventory isolated.
+        store
+            .set_archived(&p.id, p.tracking.revision, true)
+            .await
+            .unwrap();
+    }
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[tokio::test]
+async fn store_direction_updates_preserve_the_tracking_only_boundary() {
+    let d = dir();
+    let store = Store::open(&d).await.unwrap();
+    let p = project(&store).await;
+    let rel = Relationship::pending(&p, "Primary".into(), "empty".into(), None);
+    let rel = store
+        .add_relationship(&p.id, p.tracking.revision, rel, true)
+        .await
+        .unwrap();
+    let p = store.require_project(&p.id).await.unwrap();
+    let p = store
+        .mutate_project(&p.id, p.tracking.revision, |p| {
+            p.heartbeat_enabled = true;
+            p.status = "running".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let p = store
+        .mutate_project(&p.id, p.tracking.revision, |p| {
+            p.goal.clear();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(!p.heartbeat_enabled);
+    assert_eq!(p.status, "paused");
+    assert!(store.list_running_projects().await.unwrap().is_empty());
+    store
+        .edit_relationship(&p.id, &rel.id, p.tracking.revision, None, |r| {
+            r.goal_override = Some("New direction".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let p = store.require_project(&p.id).await.unwrap();
+    assert!(!p.heartbeat_enabled);
+    let p = store
+        .mutate_project(&p.id, p.tracking.revision, |p| {
+            p.heartbeat_enabled = true;
+            p.status = "running".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store
+        .edit_relationship(&p.id, &rel.id, p.tracking.revision, None, |r| {
+            r.goal_override = None;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let p = store.require_project(&p.id).await.unwrap();
+    assert!(!p.heartbeat_enabled);
+    assert_eq!(p.status, "paused");
+    let p = store
+        .mutate_project(&p.id, p.tracking.revision, |p| {
+            p.goal = "Fallback direction".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(!p.heartbeat_enabled);
+    store
+        .edit_relationship(&p.id, &rel.id, p.tracking.revision, None, |r| {
+            r.goal_override = Some(" ".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let all = store.relationships(&p.id).await.unwrap();
+    assert_eq!(effective_goal(&p, all.primary()), "Fallback direction");
+    std::fs::remove_dir_all(d).unwrap();
+}
