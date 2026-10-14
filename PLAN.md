@@ -1,3 +1,5 @@
+> Historical build log below. The current multi-instance implementation and deployment runbook are in [`docs/multi-instance-projects.md`](docs/multi-instance-projects.md); the API contract is [`docs/openapi.json`](docs/openapi.json).
+
 # Plan: Archetypes — a new primitive, third dashboard tab
 
 ## What it is

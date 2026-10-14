@@ -1,7 +1,9 @@
 //! Serialization coverage for request/response shapes that talk to the real
 //! vape API — catches accidental field drops/renames.
 
-use mazz_flux_bot::models::{CreateInstanceRequest, CreateProjectRequest, JobConfig, KanbanStatus, Project, VapeInstance};
+use mazz_flux_bot::models::{
+    CreateInstanceRequest, CreateProjectRequest, JobConfig, KanbanStatus, Project, VapeInstance,
+};
 
 #[test]
 fn job_config_model_field_serializes_when_present() {
@@ -10,7 +12,11 @@ fn job_config_model_field_serializes_when_present() {
         constellation: "back-office".to_string(),
         subdomain: None,
         ticket: None,
-        job: Some(JobConfig { prompt: "do a thing".to_string(), harness: Some("pida".to_string()), model: Some("openai/gpt-5.6-sol".to_string()) }),
+        job: Some(JobConfig {
+            prompt: "do a thing".to_string(),
+            harness: Some("pida".to_string()),
+            model: Some("openai/gpt-5.6-sol".to_string()),
+        }),
         labels: std::collections::HashMap::from([("worker".to_string(), "true".to_string())]),
     };
     let value = serde_json::to_value(&req).unwrap();
@@ -22,7 +28,11 @@ fn job_config_model_field_serializes_when_present() {
 
 #[test]
 fn job_config_model_field_omitted_when_none() {
-    let job = JobConfig { prompt: "goal".to_string(), harness: None, model: None };
+    let job = JobConfig {
+        prompt: "goal".to_string(),
+        harness: None,
+        model: None,
+    };
     let value = serde_json::to_value(&job).unwrap();
     assert!(value.get("model").is_none());
     assert!(value.get("harness").is_none());
@@ -42,10 +52,22 @@ fn create_project_request_name_is_optional() {
 /// deserialize — missing field means `None`, not a hard error.
 #[test]
 fn kanban_status_values_are_stable() {
-    assert_eq!(serde_json::to_string(&KanbanStatus::Assigned).unwrap(), r#""assigned""#);
-    assert_eq!(serde_json::to_string(&KanbanStatus::InProgress).unwrap(), r#""in_progress""#);
-    assert_eq!(serde_json::to_string(&KanbanStatus::Done).unwrap(), r#""done""#);
-    assert_eq!(serde_json::from_str::<KanbanStatus>(r#""in_progress""#).unwrap(), KanbanStatus::InProgress);
+    assert_eq!(
+        serde_json::to_string(&KanbanStatus::Assigned).unwrap(),
+        r#""assigned""#
+    );
+    assert_eq!(
+        serde_json::to_string(&KanbanStatus::InProgress).unwrap(),
+        r#""in_progress""#
+    );
+    assert_eq!(
+        serde_json::to_string(&KanbanStatus::Done).unwrap(),
+        r#""done""#
+    );
+    assert_eq!(
+        serde_json::from_str::<KanbanStatus>(r#""in_progress""#).unwrap(),
+        KanbanStatus::InProgress
+    );
 }
 
 #[test]

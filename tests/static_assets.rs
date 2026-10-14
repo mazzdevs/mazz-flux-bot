@@ -14,19 +14,18 @@ fn create_project_dialog_exposes_loading_state() {
 }
 
 #[test]
-fn project_and_instance_lifecycles_are_distinct() {
+fn project_v2_ui_targets_relationships_and_separates_delivery() {
     let dashboard_html = include_str!("../static/index.html");
     let project_html = include_str!("../static/project.html");
     let dashboard_js = include_str!("../static/app.js");
     let project_js = include_str!("../static/project.js");
-
-    assert!(dashboard_html.contains("Project status"));
-    assert!(dashboard_html.contains("Instance status"));
-    assert!(project_html.contains("Start project"));
-    assert!(project_html.contains("Pause project"));
-    assert!(project_html.contains("Start instance"));
-    assert!(project_html.contains("Stop instance"));
-    assert!(dashboard_js.contains("/instance/start"));
-    assert!(dashboard_js.contains("/instance/stop"));
-    assert!(project_js.contains("/instance/${action}"));
+    assert!(dashboard_html.contains("Automation"));
+    assert!(project_html.contains("primary only"));
+    assert!(project_js.contains("/api/v2/projects/"));
+    assert!(dashboard_js.contains("/api/v2/projects"));
+    assert!(project_js.contains("/instances/${rid}"));
+    assert!(project_js.contains("dataset.dirty"));
+    assert!(project_js.contains("expected_revision"));
+    assert!(!dashboard_js.contains("/instance/start"));
+    assert!(!project_js.contains("/api/projects/"));
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Lifecycle of a mazz-flux-bot Project. Stored as TEXT in sqlite (see db.rs).
+/// Automation lifecycle, independent of the manually managed delivery status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectStatus {
@@ -44,10 +44,14 @@ impl ProjectStatus {
     }
 }
 
-/// A user-declared goal that the heartbeat loop tries to drive to completion by
-/// managing (usually) a single vape instance running the `pida` harness.
+/// Internal automation view; persistence and API separate delivery from automation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    try_from = "crate::projects::ProjectRecord",
+    into = "crate::projects::ProjectRecord"
+)]
 pub struct Project {
+    pub tracking: crate::projects::ProjectTracking,
     pub id: String,
     pub name: String,
     /// Overall objective — direction for the conductor to compose the
@@ -70,20 +74,11 @@ pub struct Project {
     /// to `heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS` (15 minutes) for new
     /// projects, editable per project via `PATCH
     /// /api/projects/{id}/heartbeat-interval`.
-    #[serde(default = "default_heartbeat_interval_secs")]
     pub heartbeat_interval_secs: u64,
     pub last_note: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub last_heartbeat_at: Option<String>,
-}
-
-/// Serde default for `Project::heartbeat_interval_secs` — keeps `models.rs`
-/// free of a direct dependency on `heartbeat.rs` for the literal, while still
-/// reading pre-existing project JSON files written before this field existed
-/// (missing field → 15 minutes, not 0).
-fn default_heartbeat_interval_secs() -> u64 {
-    15 * 60
 }
 
 #[derive(Debug, Clone, Deserialize)]

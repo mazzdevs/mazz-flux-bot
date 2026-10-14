@@ -1133,3 +1133,17 @@ textarea#message-text {
   .section-heading-row > button { align-self: flex-start; }
   .kanban-task-controls { align-items: flex-start; flex-direction: column; }
 }
+
+/* Project v2 editors share the existing palette and controls. */
+.project-v2 { max-width: 1200px; margin: auto; }
+.project-v2 fieldset { border: 0; padding: 0; display: grid; gap: .7rem; }
+.project-v2 label { display: grid; gap: .3rem; }
+.project-v2 input, .project-v2 textarea, .project-v2 select { width: 100%; max-width: 100%; box-sizing: border-box; }
+.project-v2 input[type=checkbox] { width: auto; }
+.project-v2 textarea { min-height: 5rem; }
+.project-v2 .resource-form, .project-v2 .instance-card { padding: 1rem; margin: 1rem 0; border: 1px solid var(--border, #a0a7ab); border-radius: .6rem; }
+.project-v2 .btn-group { flex-wrap: wrap; gap: .5rem; margin-bottom: .7rem; }
+.project-v2 pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32rem; overflow: auto; }
+.project-v2 summary { cursor: pointer; padding: .7rem 0; font-weight: 600; }
+.project-v2 #notice { position: sticky; top: 0; background: var(--bg, white); z-index: 5; padding: .7rem; }
+.project-v2 [disabled] { opacity: .65; }

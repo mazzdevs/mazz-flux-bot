@@ -13,3 +13,8 @@ cmds:
     desc: Run tests
     steps:
       - cargo test
+
+  fmt:
+    desc: Format Rust source
+    steps:
+      - cargo fmt --all

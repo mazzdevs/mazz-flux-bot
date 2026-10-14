@@ -1,535 +1,125 @@
-const params = new URLSearchParams(location.search);
-const projectId = params.get("id");
-
-if (!projectId) {
-  document.body.innerHTML = "<p style='padding:2rem'>No project id in URL. <a href='/'>Back to dashboard</a>.</p>";
-  throw new Error("no project id");
+const projectId = new URLSearchParams(location.search).get('id');
+const base = `/api/v2/projects/${encodeURIComponent(projectId || '')}`;
+const statuses = [['pending','Pending'],['in_progress','In Progress'],['review','Review'],['merged','Merged'],['flags_enabled','Flags Enabled'],['flags_cleaned','Flags Cleaned']];
+let current, refreshing = false, activityEntries = [], pendingRefresh = false;
+const el = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,method='GET',body) {
+  const response=await fetch(path,{method,headers:{'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok) throw new Error(data.error?.message || data.error || `${response.status} ${response.statusText}`);
+  return data;
 }
-
-async function api(path, opts) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `${res.status} ${res.statusText}`);
-  return body;
+function notice(message,error=false){el('notice').textContent=message;el('notice').classList.toggle('error',error);}
+function field(name,label,value='',type='text') {return `<label>${label}<input name="${name}" type="${type}" value="${esc(value)}"></label>`;}
+function area(name,label,value=''){return `<label>${label}<textarea name="${name}">${esc(value)}</textarea></label>`;}
+function options(values,value){return values.map(([key,label])=>`<option value="${key}" ${value===key?'selected':''}>${label}</option>`).join('');}
+function clearDirty(form){const container=form.closest('.editor');delete form.dataset.dirty;if(!container.querySelector('form[data-dirty=true]'))delete container.dataset.dirty;}
+function nodeKey(node){
+  if(node.nodeType!==Node.ELEMENT_NODE)return null;
+  if(node.dataset.key)return node.dataset.key;
+  if(node.id)return node.id;
+  if(node.matches('form[data-form]'))return `form:${node.dataset.form}:${node.dataset.kind || ''}:${node.dataset.id || 'new'}`;
+  if(node.hasAttribute('name'))return `${node.tagName}:${node.getAttribute('name')}`;
+  return null;
 }
-
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-// ---- Relative time formatting ------------------------------------------
-
-function formatRelative(iso) {
-  if (!iso) return "never";
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return iso;
-  const diffMs = Date.now() - then;
-  const future = diffMs < 0;
-  const abs = Math.abs(diffMs);
-  const sec = Math.round(abs / 1000);
-  const units = [
-    ["year", 31536000],
-    ["month", 2592000],
-    ["day", 86400],
-    ["hour", 3600],
-    ["minute", 60],
-    ["second", 1],
-  ];
-  let label;
-  if (sec < 5) {
-    label = "just now";
-    return future ? "in a moment" : label;
-  }
-  for (const [name, secs] of units) {
-    const count = Math.floor(sec / secs);
-    if (count >= 1) {
-      label = `${count} ${name}${count === 1 ? "" : "s"}`;
-      break;
+function reconcile(parent,template){
+  const used=new Set();let cursor=parent.firstChild;
+  for(const fresh of [...template.childNodes]){
+    const key=nodeKey(fresh);
+    let old=key?[...parent.childNodes].find(n=>!used.has(n)&&nodeKey(n)===key):cursor;
+    if(!old || used.has(old) || old.nodeType!==fresh.nodeType || old.nodeName!==fresh.nodeName || (!key&&nodeKey(old))){old=fresh.cloneNode(true);parent.insertBefore(old,cursor);}
+    else {
+      if(old!==cursor)parent.insertBefore(old,cursor);
+      if(old.nodeType===Node.TEXT_NODE){if(old.textContent!==fresh.textContent)old.textContent=fresh.textContent;}
+      else if(old.nodeType===Node.ELEMENT_NODE && old.dataset.dirty!=='true'){
+        const preserve=new Set(old.matches('details')?['open','data-loaded']:[]);
+        for(const attr of [...old.attributes])if(!preserve.has(attr.name)&&!fresh.hasAttribute(attr.name))old.removeAttribute(attr.name);
+        for(const attr of [...fresh.attributes])if(!preserve.has(attr.name)&&old.getAttribute(attr.name)!==attr.value)old.setAttribute(attr.name,attr.value);
+        if(!(old.matches('details[data-session]')&&old.dataset.loaded==='true') && !(old===document.activeElement&&old.matches('input,textarea,select')))reconcile(old,fresh);
+        if(old.matches('input,textarea,select')){
+          const focused=old===document.activeElement,start=old.selectionStart,end=old.selectionEnd;
+          if(old.value!==fresh.value)old.value=fresh.value;
+          if(old.matches('input'))old.checked=fresh.checked;
+          if(focused&&typeof start==='number'&&typeof end==='number')try{old.setSelectionRange(start,end);}catch{}
+        }
+      }
     }
+    used.add(old);cursor=old.nextSibling;
   }
-  return future ? `in ${label}` : `${label} ago`;
+  for(const child of [...parent.childNodes])if(!used.has(child)&&!(child.nodeType===Node.ELEMENT_NODE&&(child.dataset.dirty==='true'||child.querySelector('[data-dirty=true]'))))child.remove();
 }
-
-function statusClass(status) {
-  const normalized = String(status || "").toLowerCase();
-  if (normalized === "running") return "status-running";
-  if (["error", "failed", "stopped"].includes(normalized)) return "status-error";
-  if (normalized === "done") return "status-done";
-  if (["blocked", "starting", "stopping", "provisioning"].includes(normalized)) return "status-blocked";
-  return "";
+function editor(id,html){
+  const node=el(id),template=document.createElement('template');template.innerHTML=html;reconcile(node,template.content);
+  node.dataset.revision=current.revision;
+  node.querySelectorAll('form').forEach(form=>{if(form.dataset.dirty!=='true')form.dataset.revision=current.revision;});
+  if(!node.querySelector('form[data-dirty=true]'))delete node.dataset.dirty;
 }
-
-let currentProject = null;
-
-async function loadProject() {
-  const { project: p } = await api(`/api/projects/${projectId}`);
-  currentProject = p;
-
-  document.getElementById("project-name").textContent = p.name;
-  document.getElementById("project-goal").textContent = p.goal;
-  document.title = `mazz-flux-bot — ${p.name}`;
-
-  const nameInput = document.getElementById("name-input");
-  if (document.activeElement !== nameInput) nameInput.value = p.name;
-  const goalInput = document.getElementById("goal-input");
-  if (document.activeElement !== goalInput) goalInput.value = p.goal;
-  const heartbeatPromptInput = document.getElementById("heartbeat-prompt-input");
-  if (document.activeElement !== heartbeatPromptInput) heartbeatPromptInput.value = p.heartbeat_prompt || "";
-
-  document.getElementById("ov-status").innerHTML = `<span class="status-pill ${statusClass(p.status)}">${escapeHtml(p.status)}</span>`;
-  document.getElementById("ov-constellation").textContent = p.constellation;
-  document.getElementById("ov-instance").innerHTML = p.vape_instance_id ? `<code>${escapeHtml(p.vape_instance_id)}</code>` : "none yet";
-
-  const instanceStatus = p.instance_status || (p.vape_instance_id ? "unknown" : "none");
-  const normalizedInstanceStatus = instanceStatus.toLowerCase();
-  const instanceStatusEl = document.getElementById("ov-instance-status");
-  instanceStatusEl.textContent = instanceStatus;
-  instanceStatusEl.className = `status-pill ${statusClass(instanceStatus)}`;
-  instanceStatusEl.title = p.instance_status_source === "unavailable" ? "Live VAPE status unavailable" : "Live VAPE instance status";
-  const canStartInstance = Boolean(p.vape_instance_id) && ["stopped", "failed", "error"].includes(normalizedInstanceStatus);
-  const canStopInstance = Boolean(p.vape_instance_id) && ["running", "starting"].includes(normalizedInstanceStatus);
-  document.getElementById("instance-start").style.display = canStartInstance ? "" : "none";
-  document.getElementById("instance-stop").style.display = canStopInstance ? "" : "none";
-  document.getElementById("instance-lifecycle-actions").style.display = canStartInstance || canStopInstance ? "inline-flex" : "none";
-
-  document.getElementById("ov-heartbeat").textContent = p.heartbeat_enabled ? "enabled" : "disabled";
-  document.getElementById("ov-last-heartbeat").title = p.last_heartbeat_at || "";
-  document.getElementById("ov-last-heartbeat").textContent = formatRelative(p.last_heartbeat_at);
-  document.getElementById("ov-last-note").textContent = p.last_note || "";
-  document.getElementById("ov-created").title = p.created_at;
-  document.getElementById("ov-created").textContent = formatRelative(p.created_at);
-
-  const intervalInput = document.getElementById("interval-input");
-  const intervalUnit = document.getElementById("interval-unit");
-  if (document.activeElement !== intervalInput && document.activeElement !== intervalUnit) {
-    // Pick the largest unit that divides evenly into whole numbers, so e.g.
-    // 900s displays as "15 minutes" instead of "900 seconds" — storage is
-    // always seconds regardless of what's shown here.
-    const secs = p.heartbeat_interval_secs;
-    let unit = 1;
-    if (secs % 3600 === 0) unit = 3600;
-    else if (secs % 60 === 0) unit = 60;
-    intervalInput.value = secs / unit;
-    intervalUnit.value = String(unit);
-  }
-
-  const canStart = p.status !== "running";
-  document.getElementById("p-start").style.display = canStart ? "" : "none";
-  document.getElementById("p-pause").style.display = canStart ? "none" : "";
-
-  return p;
+function acknowledge(result,expected,rebaseDirty=true){
+  const revision=result.revision ?? result.project?.revision;
+  if(!Number.isSafeInteger(revision))return;
+  if(rebaseDirty)document.querySelectorAll('form[data-dirty=true]').forEach(form=>{if(Number(form.dataset.revision)===expected)form.dataset.revision=revision;});
+  current.revision=Math.max(current.revision,revision);
 }
-
-// ---- Next-heartbeat countdown -------------------------------------------
-//
-// Computed client-side from last_heartbeat_at (or created_at, if it has
-// never ticked) + heartbeat_interval_secs, and re-rendered every second
-// independent of the 5s data poll so the countdown itself feels live. If
-// heartbeat_enabled is false, there's no countdown to show.
-
-function nextHeartbeatAt(p) {
-  const base = p.last_heartbeat_at || p.created_at;
-  if (!base) return null;
-  return new Date(base).getTime() + p.heartbeat_interval_secs * 1000;
+function buttons(r){if(current.archived_at)return '';return `<div class="btn-group"><button data-instance="${r.id}" data-action="start">Start instance</button><button data-instance="${r.id}" data-action="stop">Stop instance</button><button data-instance="${r.id}" data-action="rename">Rename</button><button data-instance="${r.id}" data-action="message">Message</button>${!r.is_primary?`<button data-instance="${r.id}" data-action="promote">Make primary</button>`:''}<button data-instance="${r.id}" data-action="detach" class="btn-danger">Detach (retain instance)</button></div>`;}
+function render(){
+  const p=current, disabled=p.archived_at?'disabled':'';
+  el('project-name').textContent=p.name;document.title=`${p.name} · mazz-flux-bot`;
+  el('project-summary').textContent=`${statuses.find(s=>s[0]===p.status)?.[1] || p.status} · ${p.instances.length} instances · ${p.instances.filter(r=>String(r.live.status).toLowerCase()==='running').length} running · ${p.archived_at?'Archived':'Active'}`;
+  editor('metadata',`<form data-form="metadata"><fieldset ${disabled}>${field('name','Project name',p.name)}${area('description','Description',p.description)}<label>Delivery status<select name="status">${options(statuses,p.status)}</select></label>${area('goal','Project goal',p.goal)}${area('heartbeat_prompt','Heartbeat prompt (blank clears)',p.heartbeat_prompt)}${field('constellation','Default constellation',p.constellation)}${field('heartbeat_interval_secs','Heartbeat interval (seconds)',p.automation.heartbeat_interval_secs,'number')}<button>Save project</button></fieldset></form>`);
+  const next=p.automation.last_heartbeat_at?new Date(new Date(p.automation.last_heartbeat_at).getTime()+p.automation.heartbeat_interval_secs*1000).toLocaleString():'Due now';
+  editor('automation',`<p><strong>${esc(p.automation.status)}</strong> · heartbeat ${p.automation.heartbeat_enabled?'enabled':'disabled'} · next ${p.automation.heartbeat_enabled?esc(next):'disabled'}</p><p>${esc(p.automation.last_note)}</p>${p.archived_at?'':`<button data-project-action="${p.automation.heartbeat_enabled?'pause':'start'}">${p.automation.heartbeat_enabled?'Pause project':'Start project'}</button> <button data-project-action="heartbeat/force">Force heartbeat (primary only)</button>`}`);
+  editor('instances',p.instances.map(r=>`<article class="instance-card" data-key="instance-${r.id}"><h3>${esc(r.label)} ${r.is_primary?'<span class="status-pill status-running">Primary</span>':'<span class="status-pill">Related · manual only</span>'}</h3><p>${r.vape_instance_id?`<a target="_blank" rel="noopener" href="https://vape.stable.dexus.io/instances/${encodeURIComponent(r.vape_instance_id)}">${esc(r.vape_instance_id)}</a>`:'Pending provision'} · ${esc(r.live.status || r.live.status_source)} ${esc(r.live.error || r.provision_error || '')}</p>${buttons(r)}${!r.vape_instance_id&&!p.archived_at?`<button data-instance="${r.id}" data-action="provision">Provision / reconcile</button>`:''}<details data-key="config-${r.id}"><summary>Configuration</summary><p class="sub">Constellation/model are launch configuration; editing does not rebuild a running Flux instance.</p><form data-form="instance" data-id="${r.id}"><fieldset ${disabled}>${field('label','Label',r.label)}${field('role','Role',r.role)}${field('constellation','Constellation',r.constellation)}${field('model','Model (blank uses default)',r.model)}${r.is_primary?area('goal_override','Primary goal override',r.goal_override)+area('heartbeat_prompt_override','Primary heartbeat prompt override',r.heartbeat_prompt_override):''}<button>Save configuration</button></fieldset></form></details><details data-key="session-${r.id}" data-session="${r.id}"><summary>Load live session</summary><pre>Open to fetch the latest 20 messages.</pre></details></article>`).join('') || '<p>No instances. Start project to provision a default primary, or attach an existing instance below.</p>');
+  editor('add-instance',`<form data-form="add-instance"><fieldset ${disabled}><label>Mode<select name="mode"><option value="attach">Attach existing</option><option value="provision">Configure new instance</option></select></label>${field('vape_instance_id','Existing VAPE instance ID')}${field('label','Label')}${field('role','Role','worker')}${field('constellation','Constellation',p.constellation)}${field('model','Model (optional)')}<label><input type="checkbox" name="is_primary"> Set primary (only when none exists)</label><button>Add relationship</button></fieldset></form>`);
+  editor('flags',p.launchdarkly_flags.map(f=>resourceForm('launchdarkly-flags',f,`${field('key','Flag key',f.key)}${field('project_key','LD project',f.project_key)}${field('environment_key','Environment',f.environment_key)}<label>Fully enabled target<select name="fully_enabled_value"><option value="true" ${f.fully_enabled_value?'selected':''}>true</option><option value="false" ${!f.fully_enabled_value?'selected':''}>false</option></select></label>${field('label','Label',f.label)}${area('notes','Notes',f.notes)}<p>Current: <strong>${esc(f.status?.available?JSON.stringify(f.status.current_value):'Unavailable')}</strong> · Targeting: ${esc(f.status?.targeting_on ?? 'unknown')} · ${f.status?.matches_fully_enabled?'At target':'Not at target / unknown'}<br>${esc(f.status?.error || '')} ${esc(f.status?.fetched_at || '')}</p>`)).join('')+`<details data-key="add-flag"><summary>Track a flag</summary>${resourceForm('launchdarkly-flags',null,`${field('key','Flag key')}${field('project_key','LD project','default')}${field('environment_key','Environment','production')}<label>Fully enabled target<select name="fully_enabled_value"><option value="true">true</option><option value="false">false</option></select></label>`)}</details>`);
+  editor('links',[['jira-tickets','Original Jira tickets',p.original_jira_tickets],['ec-tickets','EC tickets',p.ec_tickets],['vape-pages','VAPE pages',p.vape_pages]].map(([kind,title,entries])=>`<h3>${title}</h3>${entries.map(l=>`<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label || l.key || l.url)}</a>${resourceForm(kind,l,field('url','HTTPS URL',l.url,'url')+field('key','Ticket key (optional)',l.key)+field('label','Label',l.label))}`).join('')}<details data-key="add-${kind}"><summary>Add ${title.toLowerCase()}</summary>${resourceForm(kind,null,field('url','HTTPS URL','','url')+field('key','Key (optional)')+field('label','Label'))}</details>`).join(''));
+  editor('user-notes',p.additional_notes.map(n=>resourceForm('notes',n,field('title','Title (optional)',n.title)+area('content','Note',n.content)+`<p>Position ${n.position+1} <button type="button" data-note-move="${n.id}" data-step="-1">Move up</button> <button type="button" data-note-move="${n.id}" data-step="1">Move down</button></p>`)).join('')+resourceForm('notes',null,field('title','New note title (optional)')+area('content','New note')));
+  const filter=el('activity-filter'), selected=filter.value;if(filter!==document.activeElement)filter.innerHTML='<option value="">All relationships</option>'+p.instances.map(r=>`<option value="${r.id}">${esc(r.label)}</option>`).join('');filter.value=selected;
+  editor('lifecycle',p.archived_at?'<button data-project-action="restore">Restore (keep paused)</button> <button data-project-action="purge" class="btn-danger">Permanently purge local data</button>':'<button data-project-action="archive" class="btn-secondary">Archive project (retain instances)</button>');
 }
-
-function renderCountdown() {
-  const el = document.getElementById("ov-next-heartbeat");
-  if (!currentProject || !currentProject.heartbeat_enabled) {
-    el.textContent = "heartbeat disabled";
-    return;
-  }
-  const next = nextHeartbeatAt(currentProject);
-  if (next === null) {
-    el.textContent = "unknown";
-    return;
-  }
-  const remainingMs = next - Date.now();
-  if (remainingMs <= 0) {
-    el.textContent = "due now";
-    return;
-  }
-  const totalSec = Math.ceil(remainingMs / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  el.textContent = m > 0 ? `in ${m}m ${s}s` : `in ${s}s`;
+function resourceForm(kind,item,fields){return `<form data-form="resource" data-kind="${kind}" data-id="${item?.id || ''}" class="resource-form"><fieldset ${current.archived_at?'disabled':''}>${fields}<button>${item?'Save':'Add'}</button>${item?` <button type="button" data-resource-delete="${item.id}" data-kind="${kind}" class="btn-danger">Remove</button>`:''}</fieldset></form>`;}
+async function loadExtras(){
+  const results=await Promise.allSettled([api(`${base}/kanban`),api(`/api/human-tasks?project_id=${encodeURIComponent(projectId)}&open=false`),api(`${base}/memory`),api(`${base}/activity-notes`),api(`/api/log?project_id=${encodeURIComponent(projectId)}&limit=100`)]);
+  if(results[0].status==='fulfilled'){const tasks=results[0].value.board.tasks;editor('kanban',tasks.map(t=>`<form data-form="task" data-id="${t.id}"><fieldset ${current.archived_at?'disabled':''}>${field('title','Task',t.title)}${area('description','Details',t.description)}<label>Status<select name="status">${options([['assigned','Assigned'],['in_progress','In Progress'],['done','Done']],t.status)}</select></label><button>Save task</button> <button type="button" data-task-delete="${t.id}">Remove task</button></fieldset></form>`).join('')+`<form data-form="task"><fieldset ${current.archived_at?'disabled':''}>${field('title','New task')}${area('description','Details')}<button>Add task</button></fieldset></form>`);}
+  if(results[1].status==='fulfilled')editor('human-tasks',results[1].value.entries.map(t=>`<li><div>${esc(t.description)}<p class="sub">${esc(t.status)}</p></div>${t.status==='open'&&!current.archived_at?`<button data-resolve="${t.id}">Resolve</button>`:''}</li>`).join('') || '<li>No human tasks.</li>');
+  if(results[2].status==='fulfilled')el('memory').textContent=results[2].value.memory || 'No memory yet.';
+  if(results[3].status==='fulfilled')el('activity-notes').innerHTML=results[3].value.notes.map(n=>`<li><small>${esc(n.created_at)}</small><pre>${esc(n.content)}</pre></li>`).join('');
+  if(results[4].status==='fulfilled'){activityEntries=results[4].value.entries;renderActivity();}
 }
-
-setInterval(renderCountdown, 1000);
-
-const VAPE_DASHBOARD_URL = "https://vape.stable.dexus.io";
-
-function loadInstanceLinks(p) {
-  const linksEl = document.getElementById("ov-instance-links");
-  const linksRow = document.getElementById("ov-instance-links-row");
-  if (!p.vape_instance_id) {
-    linksRow.style.display = "none";
-    return;
-  }
-  linksRow.style.display = "";
-  linksEl.innerHTML = `<li><a href="${VAPE_DASHBOARD_URL}/instances/${escapeHtml(p.vape_instance_id)}" target="_blank" rel="noopener"><svg class="icon"><use href="/icons.svg#icon-dashboard"></use></svg> flux instance</a></li>`;
-}
-
-async function loadInstanceStatus(p) {
-  const body = document.getElementById("instance-status-body");
-  if (!p.vape_instance_id) {
-    body.textContent = "No instance yet.";
-    return;
-  }
-  if (p.instance_status_source !== "live") {
-    body.textContent = "Live VAPE instance status is unavailable.";
-    return;
-  }
-  if (String(p.instance_status).toLowerCase() !== "running") {
-    body.textContent = `Instance is ${p.instance_status}. Start it to resume agent status and heartbeats.`;
-    return;
-  }
-  try {
-    const { agent_status, pida_status, agent_status_error } = await api(`/api/instances/${p.vape_instance_id}/status`);
-    if (!agent_status) {
-      body.textContent = agent_status_error || "The instance is running, but its agent status is not available yet.";
-      return;
-    }
-    const { session } = await api(`/api/instances/${p.vape_instance_id}/session`);
-    const messages = (session?.messages || []).slice(-6).reverse();
-
-    const pidaBits = pida_status
-      ? `ready: ${pida_status.ready} · streaming: ${pida_status.is_streaming} · model: ${escapeHtml(pida_status.model || "?")} · pending question: ${
-          pida_status.pending_ask ? "yes" : "no"
-        }`
-      : "(non-pida harness or status unavailable)";
-
-    body.innerHTML = `
-      <div class="sub">harness: ${escapeHtml(agent_status.active_harness || "?")} · state: ${escapeHtml(agent_status.state)}</div>
-      <div class="sub">${pidaBits}</div>
-      <div class="notes-list" style="margin-top:0.5rem">
-        ${messages
-          .map((m) => `<li><div class="task-meta">${escapeHtml(m.role)}</div><pre>${escapeHtml(JSON.stringify(m.content ?? m, null, 0)).slice(0, 500)}</pre></li>`)
-          .join("")}
-      </div>`;
-  } catch (e) {
-    body.textContent = `failed to load live status: ${e.message}`;
-  }
-}
-
-async function loadHumanTasks() {
-  const { entries } = await api(`/api/human-tasks?project_id=${projectId}&open=false`);
-  const list = document.getElementById("p-human-tasks");
-  list.innerHTML = (entries || []).length
-    ? entries
-        .map(
-          (t) => `<li>
-            <div class="task-desc">
-              ${escapeHtml(t.description)}
-              <div class="task-meta">${escapeHtml(t.status)} · ${escapeHtml(t.created_at)}${t.resolved_at ? " · resolved " + escapeHtml(t.resolved_at) : ""}</div>
-            </div>
-            ${t.status === "open" ? `<button class="btn-secondary" data-resolve="${t.id}"><svg class="icon"><use href="/icons.svg#icon-check"></use></svg> Resolve</button>` : ""}
-          </li>`
-        )
-        .join("")
-    : `<li class="empty">No human tasks raised for this project.</li>`;
-}
-
-document.getElementById("p-human-tasks").addEventListener("click", async (ev) => {
-  const btn = ev.target.closest("button[data-resolve]");
-  if (!btn) return;
-  try {
-    await api(`/api/human-tasks/${btn.dataset.resolve}/resolve`, { method: "POST" });
-    await loadHumanTasks();
-  } catch (e) {
-    alert(e.message);
-  }
+function renderActivity(){const rid=el('activity-filter').value,relation=current.instances.find(r=>r.id===rid);el('activity').innerHTML=activityEntries.filter(e=>{if(!rid)return true;let detail={};try{detail=JSON.parse(e.detail || '{}');}catch{}return (relation?.vape_instance_id && e.instance_id===relation.vape_instance_id)||detail.relationship_id===rid;}).map(e=>`<li><strong>${esc(e.action)}</strong> · ${esc(e.instance_id || '')} · ${esc(e.created_at)}<p>${esc(e.error || e.result || '')}</p></li>`).join('');}
+el('activity-filter').addEventListener('change',renderActivity);
+async function refresh(){if(refreshing){pendingRefresh=true;return;}refreshing=true;try{const loaded=(await api(base)).project;if(!current||loaded.revision>=current.revision){current=loaded;render();await loadExtras();}}catch(e){notice(e.message,true);}finally{refreshing=false;if(pendingRefresh){pendingRefresh=false;await refresh();}}}
+document.addEventListener('input',event=>{const editor=event.target.closest('.editor');if(editor){editor.dataset.dirty='true';const form=event.target.closest('form');if(form)form.dataset.dirty='true';}});
+document.addEventListener('change',event=>{const editor=event.target.closest('.editor');if(editor){editor.dataset.dirty='true';const form=event.target.closest('form');if(form)form.dataset.dirty='true';}});
+el('reload-editors').addEventListener('click',()=>{if(!confirm('Discard unsaved edits and reload?'))return;document.querySelectorAll('[data-dirty]').forEach(e=>delete e.dataset.dirty);refresh();});
+document.addEventListener('submit',async event=>{
+  const form=event.target.closest('form[data-form]');if(!form)return;event.preventDefault();const data=Object.fromEntries(new FormData(form));const body={expected_revision:Number(form.dataset.revision)};let path=base,method='POST';
+  if(form.dataset.form==='metadata'){Object.assign(body,data,{heartbeat_interval_secs:Number(data.heartbeat_interval_secs),heartbeat_prompt:data.heartbeat_prompt || null});method='PATCH';}
+  if(form.dataset.form==='add-instance'){Object.assign(body,data,{is_primary:data.is_primary==='on'});if(data.mode==='provision')delete body.vape_instance_id;if(!body.model)delete body.model;path+='/instances';}
+  if(form.dataset.form==='instance'){Object.assign(body,data,{model:data.model || null});for(const key of ['goal_override','heartbeat_prompt_override'])if(key in data)body[key]=data[key] || null;path+=`/instances/${form.dataset.id}`;method='PATCH';}
+  if(form.dataset.form==='resource'){Object.assign(body,data);for(const key of ['key','label','title','notes'])if(key in data && data[key]==='')body[key]=null;if('fully_enabled_value' in data)body.fully_enabled_value=data.fully_enabled_value==='true';path+=`/${form.dataset.kind}${form.dataset.id?'/'+form.dataset.id:''}`;method=form.dataset.id?'PATCH':'POST';}
+  if(form.dataset.form==='task'){path+=`/kanban${form.dataset.id?'/'+form.dataset.id:''}`;Object.assign(body,data);}
+  const submit=form.querySelector('button:not([type=button])');submit.disabled=true;
+  try{const result=await api(path,method,body);clearDirty(form);acknowledge(result,body.expected_revision);notice('Saved.');await refresh();}catch(e){notice(`${e.message}. Unsaved values retained; reload saved values if needed.`,true);}finally{submit.disabled=false;}
 });
-
-async function loadNotes() {
-  const { notes } = await api(`/api/projects/${projectId}/notes`);
-  const list = document.getElementById("p-notes");
-  list.innerHTML = (notes || []).length
-    ? notes.map((n) => `<li><div class="task-meta">${escapeHtml(n.created_at)}</div><pre>${escapeHtml(n.content)}</pre></li>`).join("")
-    : `<li class="empty">No notes yet.</li>`;
-}
-
-async function loadMemory() {
-  const el = document.getElementById("memory-body");
-  try {
-    const { memory } = await api(`/api/projects/${projectId}/memory`);
-    if (memory) {
-      el.textContent = memory;
-      el.classList.remove("empty");
-    } else {
-      el.textContent = "No memory yet.";
-      el.classList.add("empty");
-    }
-  } catch (e) {
-    el.textContent = `failed to load memory: ${e.message}`;
-    el.classList.add("empty");
-  }
-}
-
-// ---- Kanban -------------------------------------------------------------
-
-const KANBAN_STATUSES = [
-  ["assigned", "Assigned"],
-  ["in_progress", "In Progress"],
-  ["done", "Done"],
-];
-
-function renderKanbanTask(task) {
-  const options = KANBAN_STATUSES.map(
-    ([value, label]) => `<option value="${value}"${task.status === value ? " selected" : ""}>${label}</option>`
-  ).join("");
-  return `<article class="kanban-task" data-task-id="${escapeHtml(task.id)}">
-    <h4>${escapeHtml(task.title)}</h4>
-    ${task.description ? `<p>${escapeHtml(task.description)}</p>` : ""}
-    <div class="kanban-task-meta" title="${escapeHtml(task.updated_at)}">Updated ${escapeHtml(formatRelative(task.updated_at))}</div>
-    <div class="kanban-task-controls">
-      <label><span class="sr-only">Status for ${escapeHtml(task.title)}</span><select data-kanban-status>${options}</select></label>
-      <div class="btn-group">
-        <button class="btn-icon" type="button" data-kanban-edit title="Edit task" aria-label="Edit ${escapeHtml(task.title)}">
-          <svg class="icon"><use href="/icons.svg#icon-note"></use></svg>
-        </button>
-        <button class="btn-icon kanban-delete" type="button" data-kanban-delete title="Delete task" aria-label="Delete ${escapeHtml(task.title)}">
-          <svg class="icon"><use href="/icons.svg#icon-trash"></use></svg>
-        </button>
-      </div>
-    </div>
-  </article>`;
-}
-
-async function loadKanban() {
-  const { board } = await api(`/api/projects/${projectId}/kanban`);
-  for (const [status] of KANBAN_STATUSES) {
-    const tasks = (board.tasks || []).filter((task) => task.status === status);
-    document.querySelector(`[data-count="${status}"]`).textContent = tasks.length;
-    document.querySelector(`[data-list="${status}"]`).innerHTML = tasks.length
-      ? tasks.map(renderKanbanTask).join("")
-      : `<div class="kanban-empty">No tasks</div>`;
-  }
-}
-
-function setKanbanFormOpen(open) {
-  const form = document.getElementById("kanban-add-form");
-  form.hidden = !open;
-  document.getElementById("kanban-add-toggle").setAttribute("aria-expanded", String(open));
-  if (open) document.getElementById("kanban-title").focus();
-}
-
-document.getElementById("kanban-add-toggle").addEventListener("click", () => {
-  setKanbanFormOpen(document.getElementById("kanban-add-form").hidden);
+document.addEventListener('click',async event=>{
+  const button=event.target.closest('button');if(!button || !current)return;
+  const revision={expected_revision:current.revision};button.disabled=true;
+  const mutate=async(path,method,body,rebaseDirty=true)=>{const result=await api(path,method,body);acknowledge(result,body.expected_revision,rebaseDirty);return result;};
+  try{
+    if(button.dataset.projectAction){const action=button.dataset.projectAction;if(action==='purge'){const confirmation=prompt('Permanently purge local data only. Type the exact project name:');if(confirmation===null)return;await mutate(base,'DELETE',{...revision,confirmation});location.href='/';return;}
+      if(action==='archive'&&!confirm('Archive project and pause automation? All instances remain untouched.'))return;await mutate(`${base}/${action}`,'POST',revision,action!=='heartbeat/force');}
+    else if(button.dataset.instance){const rid=button.dataset.instance,action=button.dataset.action,path=`${base}/instances/${rid}`;
+      if(action==='promote'){if(!confirm('Promote this instance? The former primary stays related. Clear former-primary prompt overrides first if set. Running automation becomes due now.'))return;await mutate(path,'PATCH',{...revision,is_primary:true});}
+      else if(action==='detach'){if(!confirm('Detach relationship only? The real instance stays running.'))return;await mutate(path,'DELETE',revision);}
+      else{const body={...revision};if(action==='message'){body.message=prompt('Message for this instance only:');if(!body.message)return;}if(action==='rename'){body.name=prompt('New Flux instance name:');if(!body.name)return;}if(action==='stop'&&!confirm('Stop this exact Flux instance?'))return;await mutate(`${path}/${action}`,'POST',body);}}
+    else if(button.dataset.resourceDelete){if(!confirm('Remove this record?'))return;await mutate(`${base}/${button.dataset.kind}/${button.dataset.resourceDelete}`,'DELETE',revision);const form=button.closest('form');clearDirty(form);form.remove();}
+    else if(button.dataset.noteMove){const ids=current.additional_notes.map(n=>n.id);const from=ids.indexOf(button.dataset.noteMove),to=Math.max(0,Math.min(ids.length-1,from+Number(button.dataset.step)));ids.splice(to,0,ids.splice(from,1)[0]);await mutate(`${base}/notes/reorder`,'POST',{...revision,ids});}
+    else if(button.dataset.resolve)await mutate(`/api/human-tasks/${button.dataset.resolve}/resolve`,'POST',{});
+    else if(button.dataset.taskDelete){if(!confirm('Remove task?'))return;await mutate(`${base}/kanban/${button.dataset.taskDelete}`,'DELETE',revision);const form=button.closest('form');clearDirty(form);form.remove();}
+    else return;
+    notice('Updated.');await refresh();
+  }catch(e){notice(e.message,true);}finally{button.disabled=false;}
 });
-document.getElementById("kanban-add-cancel").addEventListener("click", () => setKanbanFormOpen(false));
-
-document.getElementById("kanban-add-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const title = document.getElementById("kanban-title").value.trim();
-  const description = document.getElementById("kanban-description").value.trim();
-  if (!title) return;
-  try {
-    await api(`/api/projects/${projectId}/kanban`, {
-      method: "POST",
-      body: JSON.stringify({ title, description, status: "assigned" }),
-    });
-    ev.currentTarget.reset();
-    setKanbanFormOpen(false);
-    await loadKanban();
-  } catch (e) {
-    document.getElementById("kanban-status").textContent = e.message;
-  }
-});
-
-document.getElementById("kanban-board").addEventListener("change", async (ev) => {
-  const select = ev.target.closest("select[data-kanban-status]");
-  if (!select) return;
-  const card = select.closest("[data-task-id]");
-  select.disabled = true;
-  try {
-    await api(`/api/projects/${projectId}/kanban/${encodeURIComponent(card.dataset.taskId)}`, {
-      method: "POST",
-      body: JSON.stringify({ status: select.value }),
-    });
-    await loadKanban();
-  } catch (e) {
-    select.disabled = false;
-    document.getElementById("kanban-status").textContent = e.message;
-  }
-});
-
-document.getElementById("kanban-board").addEventListener("click", async (ev) => {
-  const card = ev.target.closest("[data-task-id]");
-  if (!card) return;
-  const taskId = encodeURIComponent(card.dataset.taskId);
-  if (ev.target.closest("[data-kanban-delete]")) {
-    if (!confirm("Delete this Kanban task?")) return;
-    try {
-      await api(`/api/projects/${projectId}/kanban/${taskId}`, { method: "DELETE" });
-      await loadKanban();
-    } catch (e) {
-      document.getElementById("kanban-status").textContent = e.message;
-    }
-    return;
-  }
-  if (ev.target.closest("[data-kanban-edit]")) {
-    const title = prompt("Task title", card.querySelector("h4").textContent);
-    if (title === null || !title.trim()) return;
-    const description = prompt("Task description", card.querySelector("p")?.textContent || "");
-    if (description === null) return;
-    try {
-      await api(`/api/projects/${projectId}/kanban/${taskId}`, {
-        method: "POST",
-        body: JSON.stringify({ title: title.trim(), description: description.trim() }),
-      });
-      await loadKanban();
-    } catch (e) {
-      document.getElementById("kanban-status").textContent = e.message;
-    }
-  }
-});
-
-async function loadLog() {
-  const { entries } = await api(`/api/log?project_id=${projectId}&limit=100`);
-  const list = document.getElementById("p-log");
-  list.innerHTML = (entries || [])
-    .map(
-      (e) =>
-        `<li><span class="action">${escapeHtml(e.action)}</span><span class="ts" title="${escapeHtml(e.created_at)}">${escapeHtml(
-          formatRelative(e.created_at)
-        )}</span><br/>${escapeHtml(e.error || e.result || "").slice(0, 300)}</li>`
-    )
-    .join("");
-}
-
-document.getElementById("p-start").addEventListener("click", async () => {
-  await api(`/api/projects/${projectId}/start`, { method: "POST" });
-  await tick();
-});
-document.getElementById("p-pause").addEventListener("click", async () => {
-  await api(`/api/projects/${projectId}/pause`, { method: "POST" });
-  await tick();
-});
-
-async function changeInstanceLifecycle(action) {
-  const startButton = document.getElementById("instance-start");
-  const stopButton = document.getElementById("instance-stop");
-  const status = document.getElementById("instance-lifecycle-status");
-  status.classList.remove("error");
-  startButton.disabled = true;
-  stopButton.disabled = true;
-  status.textContent = action === "start" ? "starting…" : "stopping…";
-  try {
-    await api(`/api/projects/${projectId}/instance/${action}`, { method: "POST" });
-    await tick();
-  } catch (error) {
-    status.textContent = error.message;
-    status.classList.add("error");
-  } finally {
-    startButton.disabled = false;
-    stopButton.disabled = false;
-    if (!status.classList.contains("error")) status.textContent = "";
-  }
-}
-
-document.getElementById("instance-start").addEventListener("click", () => changeInstanceLifecycle("start"));
-document.getElementById("instance-stop").addEventListener("click", () => changeInstanceLifecycle("stop"));
-
-document.getElementById("p-delete").addEventListener("click", async () => {
-  if (!confirm("Delete this project? (does not delete the vape instance)")) return;
-  await api(`/api/projects/${projectId}`, { method: "DELETE" });
-  location.href = "/";
-});
-
-document.getElementById("p-force-heartbeat").addEventListener("click", async (ev) => {
-  const btn = ev.currentTarget;
-  btn.disabled = true;
-  const original = btn.textContent;
-  btn.textContent = "Ticking…";
-  try {
-    await api(`/api/projects/${projectId}/heartbeat/force`, { method: "POST" });
-    await tick();
-  } catch (e) {
-    alert(e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = original;
-  }
-});
-
-document.getElementById("name-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const statusEl = document.getElementById("name-status");
-  const name = document.getElementById("name-input").value.trim();
-  if (!name) {
-    statusEl.textContent = "Project name is required.";
-    statusEl.classList.add("error");
-    return;
-  }
-  try {
-    await api(`/api/projects/${projectId}/name`, { method: "POST", body: JSON.stringify({ name }) });
-    statusEl.textContent = "saved";
-    statusEl.classList.remove("error");
-    await tick();
-  } catch (e) {
-    statusEl.textContent = e.message;
-    statusEl.classList.add("error");
-  }
-});
-
-document.getElementById("goal-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const statusEl = document.getElementById("goal-status");
-  const goal = document.getElementById("goal-input").value.trim();
-  if (!goal) return;
-  try {
-    await api(`/api/projects/${projectId}/goal`, { method: "POST", body: JSON.stringify({ goal }) });
-    statusEl.textContent = "saved";
-    statusEl.classList.remove("error");
-    await tick();
-  } catch (e) {
-    statusEl.textContent = e.message;
-    statusEl.classList.add("error");
-  }
-});
-
-document.getElementById("heartbeat-prompt-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const statusEl = document.getElementById("heartbeat-prompt-status");
-  const heartbeatPrompt = document.getElementById("heartbeat-prompt-input").value.trim();
-  try {
-    await api(`/api/projects/${projectId}/heartbeat-prompt`, { method: "POST", body: JSON.stringify({ heartbeat_prompt: heartbeatPrompt }) });
-    statusEl.textContent = "saved";
-    statusEl.classList.remove("error");
-    await tick();
-  } catch (e) {
-    statusEl.textContent = e.message;
-    statusEl.classList.add("error");
-  }
-});
-
-document.getElementById("interval-form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const raw = parseInt(document.getElementById("interval-input").value, 10);
-  const unit = parseInt(document.getElementById("interval-unit").value, 10);
-  const value = raw * unit;
-  if (!Number.isFinite(value) || value < 5) {
-    alert("Interval must be at least 5 seconds.");
-    return;
-  }
-  try {
-    await api(`/api/projects/${projectId}/heartbeat-interval`, { method: "POST", body: JSON.stringify({ heartbeat_interval_secs: value }) });
-    await tick();
-  } catch (e) {
-    alert(e.message);
-  }
-});
-
-async function tick() {
-  try {
-    const p = await loadProject();
-    renderCountdown();
-    await Promise.all([loadInstanceStatus(p), loadInstanceLinks(p), loadHumanTasks(), loadNotes(), loadMemory(), loadKanban(), loadLog()]);
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-tick();
-setInterval(tick, 5000);
+document.addEventListener('toggle',async event=>{const details=event.target;if(!details.matches?.('details[data-session]')||!details.open||details.dataset.loaded)return;const pre=details.querySelector('pre');try{const [status,session]=await Promise.all([api(`${base}/instances/${details.dataset.session}/status`),api(`${base}/instances/${details.dataset.session}/session`)]);pre.textContent=JSON.stringify({status,...session},null,2);details.dataset.loaded='true';}catch(e){pre.textContent=e.message;}},true);
+if(!projectId)notice('No project ID in URL.',true);else{refresh();setInterval(refresh,15000);}

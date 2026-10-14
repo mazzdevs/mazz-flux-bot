@@ -1,186 +1,147 @@
-# 🔥 mazz-flux-bot
+# mazz-flux-bot
 
-**An autonomous orchestrator that drives coding-agent instances toward a goal — heartbeat by heartbeat, forever, until it's done.**
+A file-backed project dashboard and heartbeat conductor for Flux/VAPE instances.
+Projects can group multiple instances, with **one explicitly selected primary** receiving
+heartbeat automation. Related instances remain manually controlled.
 
+## Project tracking
 
-<img width="1144" height="765" alt="image" src="https://github.com/user-attachments/assets/b1bdbe28-8ea6-43b0-b9ac-2d177143f756" />
+- Manual delivery status: **Pending, In Progress, Review, Merged, Flags Enabled, Flags Cleaned**.
+- Separate `automation.status`: Draft, Running, Paused, Done, Error, Blocked.
+- Description and overall goal, optional heartbeat guidance.
+- Original Jira tickets, EC tickets, VAPE pages, stable editable notes.
+- LaunchDarkly flag references with live, read-only default value / targeting / target match.
+- Multiple Flux relationships with labels, roles, launch constellation/model, and primary-only goal/prompt overrides.
+- Archive/restore and separately confirmed permanent local purge.
 
-You describe what you want built or fixed. mazz-flux-bot spins up a live [VAPE](#what-is-vape) instance running the [`pida`](#what-is-pida) coding-agent harness, gives it a real, LLM-composed opening directive, then checks in on a schedule you control — reading its progress, deciding whether to steer it, mark it done, flag an error, or raise a human task — compacting everything it learns into a running memory so it never needs to re-read the whole history to know what's going on.
+Neither automation outcomes nor LaunchDarkly values automatically change delivery status.
+Detach, archive and purge **never stop or delete a real VAPE instance**. An archived project
+retains exclusive instance ownership; detach first to reuse an instance elsewhere.
 
-It runs *inside* a VAPE instance itself, using that instance's own inference credentials — no external database, no cloud service, just flat files and a single static binary.
+## Run and verify
 
-```
-┌─────────────┐   heartbeat    ┌──────────────────┐   pida chat    ┌─────────────────┐
-│  Project     │ ─────────────▶│    Conductor      │───────────────▶│  vape instance   │
-│  (your goal) │   every N min │  (LLM decision)    │   send_message  │  running `pida`  │
-└─────────────┘                └──────────────────┘                 └─────────────────┘
-       ▲                                │                                     │
-       │                        writes memory.md                     reports status/
-       │                     (compacted, every tick)                  session messages
-       └───────────────────────────────┴─────────────────────────────────────┘
-```
-
-## Why this exists
-
-Coding agents are great at *doing* work but bad at *staying on task* unattended. Point one at a big goal, walk away, and it either finishes, drifts, gets stuck, or asks a question nobody's there to answer. mazz-flux-bot is the thing that stays there — polling, deciding, nudging, and knowing when to tap a human on the shoulder instead of guessing.
-
-## Features
-
-- **One instance per project.** Give it a goal, it spins up a real `pida`-harness VAPE instance and manages the whole lifecycle. Project heartbeat state and VAPE instance state are displayed and controlled independently.
-- **LLM-composed prompts, not templates.** The conductor writes the actual opening message to the agent *in its own words* from your goal — and composes each heartbeat's steering message the same way, informed by your optional **heartbeat prompt** plus its own running memory. Nothing is ever sent to the agent verbatim.
-- **Live context for every worker.** New pida instances receive a project-specific, read-only API URL so they can refresh their project direction, Kanban board, and available archetypes instead of relying on a stale launch-time snapshot.
-- **Persistent, compacted memory.** Every tick, the conductor rewrites a single memory file summarizing everything worth remembering — no unbounded context growth, no re-reading full history every time.
-- **Human-in-the-loop, properly.** When the conductor hits a blocker only a person can resolve, it raises one or more discrete **human tasks** — even splitting a multi-item reply from the agent into separate, independently-resolvable tasks instead of one wall of text.
-- **Per-project heartbeat cadence**, editable in seconds/minutes/hours right from the UI (default 15 minutes) — plus a **Force heartbeat** button when you don't want to wait.
-- **LLM-assisted naming.** Leave the project name blank and it'll name itself from the goal. Vape instance names are readable slugs, not `mfb-a1b2c3d4`.
-- **File-backed state, human-readable.** Every project, note, human task, and memory file is a plain JSON or Markdown file on disk — no database, browsable and editable directly through the built-in **Files** tab.
-- **Own git history for your state.** The state directory lives as its own sibling git repo, independently committable/pushable — your projects and their history survive the bot's own repo (or the whole pod) being thrown away.
-- **Built to run inside VAPE itself**, using the instance's own `OPENROUTER_API_KEY` and `gh` credentials — zero extra secrets to configure.
-- **Light/dark UI**, real buttons, a proper icon set, and a live countdown to the next heartbeat. Because a tool you're going to stare at all day should not look like `curl | jq`.
-
-## What is VAPE / pida?
-
-This tool was built to run inside **Dutchie's VAPE** ("Virtual AI Programming Environment") platform — isolated, disposable cloud dev pods that clone repos and run whatever dev servers/tools a project needs. **`pida`** is one of VAPE's supported coding-agent harnesses (the other is `bilda`) — a long-running, chat-driven agent session you can poll, message, and interrupt over HTTP.
-
-mazz-flux-bot talks to VAPE's REST API (`vape-manager`) to create/inspect/message instances, and only knows how to drive the `pida` harness today.
-
-**If you don't have access to a VAPE-like platform, this tool isn't directly useful to you as-is** — but the orchestration pattern (heartbeat loop + LLM conductor + compacted memory + file-backed state) is a clean reference if you're building something similar against a different agent platform.
-
-## Architecture
-
-```
-src/
-  main.rs           — HTTP server bootstrap, routing, CLI (`commit-state`)
-  models.rs         — Project/HumanTask/ProjectNote + vape API request/response shapes
-  store.rs          — file-backed persistence (JSON + Markdown, no database)
-  state_repo.rs      — git init/commit/push wrapper for the state directory
-  conductor.rs       — the LLM ("conductor") that makes every decision, via OpenRouter
-  heartbeat.rs        — the orchestration graph (metalcraft): route → create/fetch → decide → act
-  vape_client.rs      — REST client for vape-manager (create/start/stop/rename/chat/...)
-  api.rs             — axum HTTP handlers, one per route
-
-static/              — vanilla HTML/CSS/JS frontend, no build step, no framework
-tests/               — unit tests + a spice_framework behavioral suite for the conductor
+```sh
+bolt up
+bolt test
+bolt fmt
+bolt run
 ```
 
-**No sqlite, no Postgres.** State is plain files:
+The HTTP service listens on port 4270 by default. Static HTML/CSS/JS is served directly;
+there is no frontend framework/build step. Never expose the API outside the existing
+trusted VAPE ingress: it is a single-user operator tool, not a multi-tenant auth service.
 
-```
-<data-dir>/
-  projects/<id>.json           # one file per project
-  notes/<id>/<ts>__<uuid>.md    # append-only, timestamped
-  memory/<id>.md                 # conductor-authored, overwritten every tick
-  human_tasks/<id>/<id>.json
-  agent_prompts/validation.md   # optional, user-authored — extra mark_done criteria
-  action_log/<yyyy-mm-dd>.ndjson
-  settings.json
-```
+## Automation behavior
 
-By default this lives in a **sibling directory** next to the bot's own checkout (`../mazz-flux-bot-state`) — deliberately outside this repo's working tree, so it's a separate git repo you can push independently (see [Persisting state](#persisting-state)).
+1. Start on an empty project creates and provisions a default primary.
+2. Existing relationships without a primary produce `409 missing_primary`; select one explicitly.
+3. A project heartbeat reads the primary's status/transcript, composes a steering decision,
+   and acts only on that primary. Related instance transcripts are not polled by heartbeat.
+4. Per-project exclusion serializes forced/scheduled ticks, lifecycle changes and promotion.
+5. Promotion keeps shared memory with a transition marker, clears last-heartbeat time,
+   and makes the new primary due now. A paused project remains paused until Start/Force.
+6. Done/Error/Blocked pause automation, not delivery tracking.
 
-## The heartbeat loop
+Provisioning first reconciles `mazz-flux-project` / `mazz-flux-relationship` labels. Once a
+create has an ambiguous transport/5xx outcome, a retry only reconciles; it does not blindly
+create another instance. An uncertain request remains visible as a pending relationship.
+Definitive pre-send/auth/configuration failures and confirmed HTTP rejections remain retryable
+on the same relationship after correction. Every persisted attempt/error advances the project
+revision, so refresh the revision before correcting or retrying. Constellation/model edits describe launch configuration;
+they do not rebuild an already provisioned pod or switch its active model.
 
-Each tick, for each running project whose interval has elapsed:
+## API v2
 
-1. **No instance yet?** Create one — conductor composes the opening prompt from your goal, picks a readable name (LLM-assisted, deterministic fallback), spawns a real `pida` instance.
-2. **Instance exists?** Fetch its live status + last 6 chat messages.
-3. **Decide.** The conductor sees `goal`, your optional `heartbeat_prompt`, its own `memory` from last time, and the current status — and returns one of:
-   - `wait` — nothing to do this tick
-   - `send_message` — compose and send a steering message (in its own words)
-   - `mark_done` — the goal is achieved (optionally gated by `agent_prompts/validation.md`, if you've written one)
-   - `mark_error` — stuck in a way a message can't fix
-   - `create_human_task` — raise one or more discrete blockers for a person
-   - always: a rewritten `memory` summary, replacing the last one
-4. **Act + persist.** Whatever it decided gets executed and logged.
+**Hard cut:** project list/detail/mutation routes now live at `/api/v2/projects`.
+The only retained old project route is GET-only `/api/projects/{id}/agent-context`, an alias
+for workers whose original launch instructions contain that URL.
 
-## Quick start
+Contract: [`docs/openapi.json`](docs/openapi.json), also `GET /api/v2/openapi.json`.
+Runbook: [`docs/multi-instance-projects.md`](docs/multi-instance-projects.md).
 
-Requires Rust (pinned via [`bolt`](https://dutchie.roadie.so/docs/default/component/bolt/), or your own toolchain — no C dependencies, pure Rust).
+```sh
+# Create metadata; name is optional and generated asynchronously when possible.
+curl -X POST localhost:4270/api/v2/projects -H 'content-type: application/json' \
+  -d '{"name":"My feature","goal":"Implement and validate the feature","description":"Delivery context","status":"pending"}'
 
-```bash
-git clone <this-repo>
-cd mazz-flux-bot
-export OPENROUTER_API_KEY=sk-or-v1-...   # the only secret this needs
-cargo run
-# → mazz-flux-bot listening on http://0.0.0.0:4270
-```
+# Read the latest revision before every domain mutation.
+curl localhost:4270/api/v2/projects/PROJECT_ID
+curl -X PATCH localhost:4270/api/v2/projects/PROJECT_ID -H 'content-type: application/json' \
+  -d '{"expected_revision":2,"status":"review","heartbeat_prompt":null}'
 
-Open `http://localhost:4270`, click **New project**, describe a goal (name optional — it'll pick one), hit **Start**. That's it.
+# Attach an existing instance (does not start/stop/message it).
+curl -X POST localhost:4270/api/v2/projects/PROJECT_ID/instances -H 'content-type: application/json' \
+  -d '{"expected_revision":3,"mode":"attach","vape_instance_id":"INSTANCE_ID","label":"Reviewer","role":"reviewer","is_primary":true}'
 
-### Configuration
-
-All environment variables, all optional except the API key:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `OPENROUTER_API_KEY` | *(none — conductor disabled)* | The only required secret. Without it, the bot still creates/observes instances but never steers, marks done, or raises tasks. |
-| `OPENROUTER_MODEL` | `openai/gpt-5.6-sol` | Conductor's own decision-making model. Overridable per-run in Settings. |
-| `MAZZ_FLUX_INSTANCE_MODEL` | `openai/gpt-5.6-sol` | Model used by spawned vape instances. Also overridable in Settings. |
-| `MAZZ_FLUX_PUBLIC_BASE_URL` | auto-detected in VAPE | Public bot URL embedded in new workers' live-context instructions. Also overridable in Settings. |
-| `PORT` | `4270` | HTTP port and the port used when auto-deriving the public preview URL. |
-| `MAZZ_FLUX_DATA_DIR` | `../mazz-flux-bot-state` | Where all project/note/memory files live. |
-| `MAZZ_FLUX_LIVE` | live by default | Set `0`/`false` to dry-run every mutating vape call (logged, not fired). |
-| `HEARTBEAT_SCAN_INTERVAL_SECS` | `15` | How often the outer loop checks which projects are due (each project's own cadence is separate, see below). |
-| `CADMIUM_VAPE_URL` / `VAPE_MANAGER_URL` | `https://vape.stable.dexus.io` | vape-manager base URL — auto-detected from the in-cluster env var when running inside a VAPE instance. |
-| `MAZZ_FLUX_STATE_REPO_URL` | *(none)* | Git remote for the state directory — enables `POST /api/state/commit` to push, not just commit locally. |
-| `MAZZ_FLUX_STATE_BRANCH` | `main` | Branch pushed to `MAZZ_FLUX_STATE_REPO_URL`. |
-
-### Persisting state
-
-The state directory is its own git repo. Commit it manually from the UI (Files tab → the commit affordance) or on demand:
-
-```bash
-cargo run -- commit-state "end of day snapshot"
+# All manual actions name a relationship, not an implicit project instance.
+curl -X POST localhost:4270/api/v2/projects/PROJECT_ID/instances/RELATIONSHIP_ID/message \
+  -H 'content-type: application/json' -d '{"expected_revision":4,"message":"Review this change"}'
 ```
 
-Set `MAZZ_FLUX_STATE_REPO_URL` to a real remote and every commit pushes too — your projects, notes, and memory survive the bot's own pod being deleted.
+| Resource | Operations |
+|---|---|
+| `/api/v2/projects` | GET list (`?archived=true` includes archived), POST create |
+| `/api/v2/projects/{id}` | GET aggregate, PATCH metadata, DELETE confirmed archived-local purge |
+| `.../archive`, `.../restore`, `.../start`, `.../pause`, `.../heartbeat/force` | POST with `expected_revision` |
+| `.../instances` | GET, POST attach or configure pending provision |
+| `.../instances/{relationship_id}` | GET, PATCH configuration/primary, DELETE detach |
+| `.../instances/{relationship_id}/{provision,start,stop,rename,message}` | Explicit POST actions |
+| `.../instances/{relationship_id}/{status,session}` | GET on demand; session bounded to last 20 messages |
+| `.../{notes,jira-tickets,ec-tickets,vape-pages,launchdarkly-flags}` | GET/POST collection, GET/PATCH/DELETE by stable resource ID |
+| `.../notes/reorder` | POST `{expected_revision, ids:[...]}` (each note ID exactly once) |
+| `.../kanban`, `.../kanban/{task_id}` | GET/POST board/create, POST/DELETE task with revision |
+| `.../memory`, `.../activity-notes`, `.../agent-context` | GET conductor memory, history and worker context |
 
-## The API
+PATCH omitted fields stay unchanged; explicit null clears nullable fields, and empty arrays
+clear collections. Replacing a whole link/flag array assigns new resource IDs; use individual
+PATCH to retain identity. IDs, timestamps and live provider fields are not writable. All domain
+writes except create require `expected_revision`; stale writes return `409 stale_revision`.
+A successful mutation may advance more than one revision and returns its acknowledged
+`revision`. Use that revision to rebase local sibling drafts; a later unrelated external change
+still produces a conflict. Fetch the current project when starting a new edit.
 
-Everything the UI does, you can do directly — this is a first-class API, not an afterthought, and it's exactly what a `pida` instance running *inside* the same pod as this bot can use to manage its own projects.
+Preserved unversioned utilities: archetypes, settings, raw instance reads, constellations,
+human tasks, global action log, state snapshots and the raw file browser. The file browser is
+an operator escape hatch, not a substitute for revision-checked domain writes. Editing managed
+JSON directly bypasses domain validation; stop the service and validate migration before boot.
 
-```bash
-# Create a project — name is optional, the conductor will name it from the goal
-curl -X POST localhost:4270/api/projects \
-  -H 'content-type: application/json' \
-  -d '{"goal": "Add a health check endpoint and confirm it returns 200"}'
+## Configuration
 
-curl -X POST localhost:4270/api/projects/<id>/start
-curl -X POST localhost:4270/api/projects/<id>/heartbeat/force   # don't wait for the timer
-curl localhost:4270/api/projects/<id>/memory                     # what the conductor remembers right now
+| Variable | Default / behavior |
+|---|---|
+| `PORT` | `4270` |
+| `MAZZ_FLUX_DATA_DIR` | Sibling `../mazz-flux-bot-state` |
+| `OPENROUTER_API_KEY` | Optional environment-only conductor credential; absent = observe without steering |
+| `OPENROUTER_MODEL` | `openai/gpt-5.6-sol`; settings override supported |
+| `MAZZ_FLUX_INSTANCE_MODEL` | Default spawned model; settings/relationship override supported |
+| `MAZZ_FLUX_PUBLIC_BASE_URL` | Auto-detected when possible; settings override supported |
+| `MAZZ_FLUX_LIVE` | Live by default; `0`/`false` blocks VAPE mutations |
+| `HEARTBEAT_SCAN_INTERVAL_SECS` | `15` |
+| `CADMIUM_VAPE_URL` / `VAPE_MANAGER_URL` | VAPE Manager endpoint |
+| `LD_ACCESS_TOKEN` | Optional direct LaunchDarkly **read-only** access token |
+| `MAZZ_FLUX_STATE_REPO_URL` | Optional state Git remote |
+| `MAZZ_FLUX_STATE_BRANCH` | Snapshot push branch; defaults to `main` (set a feature branch where required) |
+
+LD calls are GET-only, use a five-second timeout and a sixty-second cache. Up to 32 flags are
+tracked per project. Missing credentials, inaccessible flags/environments, mixed defaults,
+network errors, and provider failures yield explicit per-flag unavailable results without
+blocking project reads. A matching default is not proof that all targeting rules/users have
+completed rollout; the dashboard compares the environment default only.
+
+## State migration
+
+Startup automatically preflights all projects and migrates legacy records to schema 2 before
+starting HTTP/heartbeat. An error prevents startup without partial preflight writes. Every old
+project becomes manual Pending while its old automation lifecycle, VAPE ID and history remain.
+
+```sh
+# Only against a copied state directory while validating:
+MAZZ_FLUX_DATA_DIR=/root/workspace/mazz-flux-bot/target/state-copy \
+  target/debug/mazz-flux-bot migrate-state           # dry-run; checksums and errors
+MAZZ_FLUX_DATA_DIR=/root/workspace/mazz-flux-bot/target/state-copy \
+  target/debug/mazz-flux-bot migrate-state --apply
 ```
 
-| Method | Path | What |
-|---|---|---|
-| `GET/POST` | `/api/projects` | List / create projects |
-| `GET/DELETE` | `/api/projects/{id}` | Fetch / delete a project |
-| `GET` | `/api/projects/{id}/agent-context` | Read-only project, Kanban, and archetype context for its worker |
-| `POST` | `/api/projects/{id}/start` \| `/pause` | Toggle the heartbeat |
-| `POST` | `/api/projects/{id}/message` | Manually send a chat message, bypassing the conductor |
-| `POST` | `/api/projects/{id}/name` | Rename the project |
-| `POST` | `/api/projects/{id}/goal` \| `/heartbeat-prompt` | Edit either prompt |
-| `POST` | `/api/projects/{id}/heartbeat-interval` | Per-project cadence, in seconds |
-| `POST` | `/api/projects/{id}/heartbeat/force` | Run one tick right now |
-| `GET` | `/api/projects/{id}/notes` \| `/memory` | Conductor's notes / current memory |
-| `POST` | `/api/projects/{id}/instance/rename` | Rename the underlying vape instance |
-| `POST` | `/api/projects/{id}/instance/start` \| `/stop` | Start or stop the underlying VAPE instance without changing project heartbeat state |
-| `GET` | `/api/human-tasks` | Open (or all) human tasks, across every project |
-| `POST` | `/api/human-tasks/{id}/resolve` | Resolve one |
-| `GET` | `/api/log` | Action log, global or `?project_id=` scoped |
-| `GET` | `/api/instances`, `/api/instances/{id}`, `/status`, `/session` | Read-through to vape-manager |
-| `GET/PUT/DELETE` | `/api/files?path=` | Browse/edit/delete anything under the state directory |
-| `GET/POST` | `/api/settings` | Model selection and public bot URL override |
-| `POST` | `/api/state/commit` | Snapshot (and push, if configured) the state repo |
-
-## Development
-
-```bash
-cargo build
-cargo test        # unit tests + a spice_framework behavioral suite for the conductor's decision parsing
-```
-
-No frontend build step — `static/` is served as-is by `tower-http`'s `ServeDir`. Edit, refresh.
-
-## Status
-
-A real, working tool that's been driving real PR/nitpick-resolution work against real repos from inside a real VAPE instance — not a demo. Still a young project: expect rough edges, and read `PLAN.md` for the full, unvarnished build history if you want to know exactly what's been verified live versus what's just wired up and untested.
+Before deployment snapshot state and stop the old writer. Roll back **binary and state together**;
+an old binary can otherwise drop new fields when it rewrites JSON. Only one bot process may
+write a state directory. See the runbook for the full cutover and recovery sequence.

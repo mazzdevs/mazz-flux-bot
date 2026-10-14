@@ -23,17 +23,24 @@
 //!   cache/instances.json
 //! ```
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+mod projects;
 
 use anyhow::{Context, Result};
 use tokio::fs;
 use tokio::sync::Mutex;
 
-use crate::models::{default_archetype_model, ActionLogEntry, Archetype, CreateProjectRequest, HumanTask, KanbanBoard, KanbanStatus, KanbanTask, Project, ProjectNote, ProjectStatus};
+use crate::models::{
+    ActionLogEntry, Archetype, CreateProjectRequest, HumanTask, KanbanBoard, KanbanStatus,
+    KanbanTask, Project, ProjectNote, ProjectStatus, default_archetype_model,
+};
 
 pub struct Store {
     root: PathBuf,
     lock: Mutex<()>,
+    project_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 /// One entry in a directory listing returned by `Store::browse`.
@@ -53,8 +60,16 @@ pub struct FileEntry {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrowseResult {
-    Dir { path: String, entries: Vec<FileEntry> },
-    File { path: String, content: String, size: u64, modified_at: Option<String> },
+    Dir {
+        path: String,
+        entries: Vec<FileEntry>,
+    },
+    File {
+        path: String,
+        content: String,
+        size: u64,
+        modified_at: Option<String>,
+    },
 }
 
 /// Files larger than this are refused for reading/browsing through the file
@@ -75,19 +90,31 @@ fn short_uuid() -> String {
 /// crash mid-write never leaves a half-written file at the real path.
 async fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await.with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let mut tmp_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp").to_string();
+    let mut tmp_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("tmp")
+        .to_string();
     tmp_name.push_str(".tmp");
     let tmp = path.with_file_name(tmp_name);
-    fs::write(&tmp, contents).await.with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).await.with_context(|| format!("renaming into {}", path.display()))?;
+    fs::write(&tmp, contents)
+        .await
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .await
+        .with_context(|| format!("renaming into {}", path.display()))?;
     Ok(())
 }
 
 async fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     match fs::read_to_string(path).await {
-        Ok(s) => Ok(Some(serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?)),
+        Ok(s) => Ok(Some(
+            serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?,
+        )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
@@ -124,8 +151,19 @@ impl Store {
     /// Opens (creating if needed) a file store rooted at `root`.
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        fs::create_dir_all(&root).await.with_context(|| format!("creating data dir {}", root.display()))?;
-        Ok(Self { root, lock: Mutex::new(()) })
+        fs::create_dir_all(&root)
+            .await
+            .with_context(|| format!("creating data dir {}", root.display()))?;
+        let store = Self {
+            root,
+            lock: Mutex::new(()),
+            project_locks: Mutex::new(HashMap::new()),
+        };
+        let report = store.migrate(false).await?;
+        if !report.errors.is_empty() {
+            anyhow::bail!("migration preflight failed: {}", report.errors.join("; "));
+        }
+        Ok(store)
     }
 
     pub fn root(&self) -> &Path {
@@ -170,38 +208,86 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         let ts = now();
         let project = Project {
+            tracking: crate::projects::ProjectTracking {
+                schema_version: 2,
+                revision: 1,
+                ..Default::default()
+            },
             id: id.clone(),
-            name: req.name.unwrap_or_else(|| format!("project-{}", &id[..8.min(id.len())])),
+            name: req
+                .name
+                .unwrap_or_else(|| format!("project-{}", &id[..8.min(id.len())])),
             goal: req.goal,
             heartbeat_prompt: req.heartbeat_prompt,
-            constellation: req.constellation.unwrap_or_else(|| "back-office".to_string()),
+            constellation: req
+                .constellation
+                .unwrap_or_else(|| "back-office".to_string()),
             status: ProjectStatus::Draft.as_str().to_string(),
             vape_instance_id: None,
             heartbeat_enabled: false,
-            heartbeat_interval_secs: req.heartbeat_interval_secs.unwrap_or(crate::heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS),
+            heartbeat_interval_secs: req
+                .heartbeat_interval_secs
+                .unwrap_or(crate::heartbeat::DEFAULT_HEARTBEAT_INTERVAL_SECS),
             last_note: None,
             created_at: ts.clone(),
             updated_at: ts.clone(),
             last_heartbeat_at: None,
         };
+        write_json(
+            &self.relationship_path(&id),
+            &crate::projects::Relationships {
+                project_id: id.clone(),
+                ..Default::default()
+            },
+        )
+        .await?;
         write_json(&self.project_path(&id), &project).await?;
-        write_json(&self.kanban_path(&id), &KanbanBoard { project_id: id.clone(), tasks: Vec::new(), updated_at: ts }).await?;
+        write_json(
+            &self.kanban_path(&id),
+            &KanbanBoard {
+                project_id: id.clone(),
+                tasks: Vec::new(),
+                updated_at: ts,
+            },
+        )
+        .await?;
         Ok(project)
     }
 
     pub async fn list_projects(&self) -> Result<Vec<Project>> {
         let mut projects: Vec<Project> = read_json_dir(&self.root.join("projects")).await?;
+        for project in &mut projects {
+            project.vape_instance_id = self
+                .relationships(&project.id)
+                .await?
+                .primary()
+                .and_then(|r| r.vape_instance_id.clone());
+        }
         projects.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(projects)
     }
 
     pub async fn get_project(&self, id: &str) -> Result<Option<Project>> {
-        read_json(&self.project_path(id)).await
+        crate::projects::validate_id(id)?;
+        let mut project: Option<Project> = read_json(&self.project_path(id)).await?;
+        if let Some(p) = &mut project {
+            p.vape_instance_id = self
+                .relationships(id)
+                .await?
+                .primary()
+                .and_then(|r| r.vape_instance_id.clone());
+        }
+        Ok(project)
     }
 
     pub async fn list_running_projects(&self) -> Result<Vec<Project>> {
         let projects = self.list_projects().await?;
-        Ok(projects.into_iter().filter(|p| p.heartbeat_enabled && p.status == "running").collect())
+        Ok(projects
+            .into_iter()
+            .filter(|p| {
+                p.heartbeat_enabled && p.status == "running" && p.tracking.archived_at.is_none()
+            })
+            .collect())
     }
 
     pub async fn delete_project(&self, id: &str) -> Result<()> {
@@ -219,17 +305,29 @@ impl Store {
     async fn update_project(&self, id: &str, f: impl FnOnce(&mut Project)) -> Result<()> {
         let _guard = self.lock.lock().await;
         let path = self.project_path(id);
-        let mut project: Project = read_json(&path).await?.ok_or_else(|| anyhow::anyhow!("project {id} not found"))?;
+        let mut project: Project = read_json(&path)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("project {id} not found"))?;
         f(&mut project);
         project.updated_at = now();
+        project.tracking.revision += 1;
         write_json(&path, &project).await
     }
 
     pub async fn set_project_instance(&self, id: &str, instance_id: &str) -> Result<()> {
-        self.update_project(id, |p| p.vape_instance_id = Some(instance_id.to_string())).await
+        let relations = self.relationships(id).await?;
+        let primary = relations.primary().ok_or_else(|| {
+            crate::projects::failure("missing_primary", "select a primary instance")
+        })?;
+        self.bind_instance(id, &primary.id, instance_id).await
     }
 
-    pub async fn set_project_status(&self, id: &str, status: ProjectStatus, note: Option<&str>) -> Result<()> {
+    pub async fn set_project_status(
+        &self,
+        id: &str,
+        status: ProjectStatus,
+        note: Option<&str>,
+    ) -> Result<()> {
         let note = note.map(|s| s.to_string());
         self.update_project(id, |p| {
             p.status = status.as_str().to_string();
@@ -242,18 +340,21 @@ impl Store {
     /// original sqlite-era doc comment on this in db.rs's history for why
     /// start/pause use this instead.
     pub async fn set_project_status_only(&self, id: &str, status: ProjectStatus) -> Result<()> {
-        self.update_project(id, |p| p.status = status.as_str().to_string()).await
+        self.update_project(id, |p| p.status = status.as_str().to_string())
+            .await
     }
 
     pub async fn set_heartbeat_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        self.update_project(id, |p| p.heartbeat_enabled = enabled).await
+        self.update_project(id, |p| p.heartbeat_enabled = enabled)
+            .await
     }
 
     /// Per-project heartbeat cadence override — minimum 5 seconds, mostly to
     /// stop a fat-fingered `0` from turning a project into a busy-loop.
     pub async fn set_heartbeat_interval(&self, id: &str, interval_secs: u64) -> Result<()> {
         let interval_secs = interval_secs.max(5);
-        self.update_project(id, |p| p.heartbeat_interval_secs = interval_secs).await
+        self.update_project(id, |p| p.heartbeat_interval_secs = interval_secs)
+            .await
     }
 
     pub async fn set_project_name(&self, id: &str, name: &str) -> Result<()> {
@@ -269,8 +370,13 @@ impl Store {
     /// Empty string clears it back to `None` ("no heartbeat-prompt guidance,
     /// use judgment") — same convention as `Store::set_setting`.
     pub async fn set_heartbeat_prompt(&self, id: &str, heartbeat_prompt: &str) -> Result<()> {
-        let value = if heartbeat_prompt.is_empty() { None } else { Some(heartbeat_prompt.to_string()) };
-        self.update_project(id, |p| p.heartbeat_prompt = value).await
+        let value = if heartbeat_prompt.is_empty() {
+            None
+        } else {
+            Some(heartbeat_prompt.to_string())
+        };
+        self.update_project(id, |p| p.heartbeat_prompt = value)
+            .await
     }
 
     pub async fn touch_heartbeat(&self, id: &str, note: Option<&str>) -> Result<()> {
@@ -288,25 +394,46 @@ impl Store {
     // ---- Kanban -----------------------------------------------------------
 
     fn empty_kanban_board(project_id: &str) -> KanbanBoard {
-        KanbanBoard { project_id: project_id.to_string(), tasks: Vec::new(), updated_at: now() }
+        KanbanBoard {
+            project_id: project_id.to_string(),
+            tasks: Vec::new(),
+            updated_at: now(),
+        }
     }
 
     /// Missing boards are empty for projects created before Kanban support.
     pub async fn get_kanban_board(&self, project_id: &str) -> Result<KanbanBoard> {
-        Ok(read_json(&self.kanban_path(project_id)).await?.unwrap_or_else(|| Self::empty_kanban_board(project_id)))
+        Ok(read_json(&self.kanban_path(project_id))
+            .await?
+            .unwrap_or_else(|| Self::empty_kanban_board(project_id)))
     }
 
-    pub async fn create_kanban_task(&self, project_id: &str, title: &str, description: &str, status: KanbanStatus) -> Result<KanbanTask> {
+    pub async fn create_kanban_task(
+        &self,
+        project_id: &str,
+        title: &str,
+        description: &str,
+        status: KanbanStatus,
+    ) -> Result<KanbanTask> {
         let _guard = self.lock.lock().await;
-        if read_json::<Project>(&self.project_path(project_id)).await?.is_none() {
+        if read_json::<Project>(&self.project_path(project_id))
+            .await?
+            .is_none()
+        {
             anyhow::bail!("project {project_id} not found");
         }
         let path = self.kanban_path(project_id);
-        let mut board = read_json(&path).await?.unwrap_or_else(|| Self::empty_kanban_board(project_id));
+        let mut board = read_json(&path)
+            .await?
+            .unwrap_or_else(|| Self::empty_kanban_board(project_id));
         let ts = now();
         let task = KanbanTask {
-            id: uuid::Uuid::new_v4().to_string(), title: title.trim().to_string(), description: description.trim().to_string(),
-            status, created_at: ts.clone(), updated_at: ts.clone(),
+            id: uuid::Uuid::new_v4().to_string(),
+            title: title.trim().to_string(),
+            description: description.trim().to_string(),
+            status,
+            created_at: ts.clone(),
+            updated_at: ts.clone(),
         };
         board.tasks.push(task.clone());
         board.updated_at = ts;
@@ -315,14 +442,31 @@ impl Store {
     }
 
     /// Returns None for an unknown task id without touching the board file.
-    pub async fn update_kanban_task(&self, project_id: &str, task_id: &str, title: Option<&str>, description: Option<&str>, status: Option<KanbanStatus>) -> Result<Option<KanbanTask>> {
+    pub async fn update_kanban_task(
+        &self,
+        project_id: &str,
+        task_id: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+        status: Option<KanbanStatus>,
+    ) -> Result<Option<KanbanTask>> {
         let _guard = self.lock.lock().await;
         let path = self.kanban_path(project_id);
-        let Some(mut board): Option<KanbanBoard> = read_json(&path).await? else { return Ok(None) };
-        let Some(task) = board.tasks.iter_mut().find(|task| task.id == task_id) else { return Ok(None) };
-        if let Some(title) = title { task.title = title.trim().to_string(); }
-        if let Some(description) = description { task.description = description.trim().to_string(); }
-        if let Some(status) = status { task.status = status; }
+        let Some(mut board): Option<KanbanBoard> = read_json(&path).await? else {
+            return Ok(None);
+        };
+        let Some(task) = board.tasks.iter_mut().find(|task| task.id == task_id) else {
+            return Ok(None);
+        };
+        if let Some(title) = title {
+            task.title = title.trim().to_string();
+        }
+        if let Some(description) = description {
+            task.description = description.trim().to_string();
+        }
+        if let Some(status) = status {
+            task.status = status;
+        }
         let ts = now();
         task.updated_at = ts.clone();
         let updated = task.clone();
@@ -334,10 +478,14 @@ impl Store {
     pub async fn delete_kanban_task(&self, project_id: &str, task_id: &str) -> Result<bool> {
         let _guard = self.lock.lock().await;
         let path = self.kanban_path(project_id);
-        let Some(mut board): Option<KanbanBoard> = read_json(&path).await? else { return Ok(false) };
+        let Some(mut board): Option<KanbanBoard> = read_json(&path).await? else {
+            return Ok(false);
+        };
         let old_len = board.tasks.len();
         board.tasks.retain(|task| task.id != task_id);
-        if board.tasks.len() == old_len { return Ok(false); }
+        if board.tasks.len() == old_len {
+            return Ok(false);
+        }
         board.updated_at = now();
         write_json(&path, &board).await?;
         Ok(true)
@@ -376,7 +524,11 @@ impl Store {
         // partial line from a crash mid-write is an acceptable, self-evident
         // failure mode here (unlike the full-file rewrites elsewhere).
         use tokio::io::AsyncWriteExt;
-        let mut f = fs::OpenOptions::new().create(true).append(true).open(&path).await?;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
         f.write_all(line.as_bytes()).await?;
         Ok(())
     }
@@ -384,7 +536,11 @@ impl Store {
     /// Reads the most recent `limit` entries, optionally filtered to one
     /// project. Scans day-shard files newest-first; each file's lines are
     /// newest-last so read within a file in reverse too.
-    pub async fn list_action_log(&self, project_id: Option<&str>, limit: i64) -> Result<Vec<ActionLogEntry>> {
+    pub async fn list_action_log(
+        &self,
+        project_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ActionLogEntry>> {
         let dir = self.root.join("action_log");
         let mut days: Vec<String> = match fs::read_dir(&dir).await {
             Ok(mut entries) => {
@@ -409,7 +565,9 @@ impl Store {
             if out.len() as i64 >= limit {
                 break;
             }
-            let content = fs::read_to_string(self.action_log_path(&day)).await.unwrap_or_default();
+            let content = fs::read_to_string(self.action_log_path(&day))
+                .await
+                .unwrap_or_default();
             let mut lines: Vec<&str> = content.lines().collect();
             lines.reverse();
             for line in lines {
@@ -505,8 +663,14 @@ impl Store {
             if path.extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
-            let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let raw = fs::read_to_string(&path).await.with_context(|| format!("reading {}", path.display()))?;
+            let slug = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let raw = fs::read_to_string(&path)
+                .await
+                .with_context(|| format!("reading {}", path.display()))?;
             out.push(parse_archetype(&slug, &raw));
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -523,7 +687,12 @@ impl Store {
 
     /// Errors on slug collision rather than silently overwriting an existing
     /// archetype — use `update_archetype` to edit one.
-    pub async fn create_archetype(&self, name: &str, description: &str, preferred_model: Option<&str>) -> Result<Archetype> {
+    pub async fn create_archetype(
+        &self,
+        name: &str,
+        description: &str,
+        preferred_model: Option<&str>,
+    ) -> Result<Archetype> {
         let _guard = self.lock.lock().await;
         let slug = crate::heartbeat::slugify(name);
         if slug.is_empty() {
@@ -537,17 +706,28 @@ impl Store {
             slug: slug.clone(),
             name: name.to_string(),
             description: description.to_string(),
-            preferred_model: preferred_model.filter(|m| !m.is_empty()).map(|m| m.to_string()).unwrap_or_else(default_archetype_model),
+            preferred_model: preferred_model
+                .filter(|m| !m.is_empty())
+                .map(|m| m.to_string())
+                .unwrap_or_else(default_archetype_model),
         };
         write_atomic(&path, &serialize_archetype(&archetype)).await?;
         Ok(archetype)
     }
 
     /// `None` for any field leaves it unchanged.
-    pub async fn update_archetype(&self, slug: &str, name: Option<&str>, description: Option<&str>, preferred_model: Option<&str>) -> Result<Archetype> {
+    pub async fn update_archetype(
+        &self,
+        slug: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        preferred_model: Option<&str>,
+    ) -> Result<Archetype> {
         let _guard = self.lock.lock().await;
         let path = self.archetype_path(slug);
-        let raw = fs::read_to_string(&path).await.with_context(|| format!("archetype '{slug}' not found"))?;
+        let raw = fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("archetype '{slug}' not found"))?;
         let mut archetype = parse_archetype(slug, &raw);
         if let Some(n) = name {
             archetype.name = n.to_string();
@@ -556,7 +736,11 @@ impl Store {
             archetype.description = d.to_string();
         }
         if let Some(m) = preferred_model {
-            archetype.preferred_model = if m.is_empty() { default_archetype_model() } else { m.to_string() };
+            archetype.preferred_model = if m.is_empty() {
+                default_archetype_model()
+            } else {
+                m.to_string()
+            };
         }
         write_atomic(&path, &serialize_archetype(&archetype)).await?;
         Ok(archetype)
@@ -616,14 +800,21 @@ impl Store {
         if value.is_empty() {
             map.remove(key);
         } else {
-            map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+            map.insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
         }
         write_json(&self.settings_path(), &serde_json::Value::Object(map)).await
     }
 
     // ---- Human tasks --------------------------------------------------------
 
-    pub async fn create_human_task(&self, project_id: &str, description: &str) -> Result<HumanTask> {
+    pub async fn create_human_task(
+        &self,
+        project_id: &str,
+        description: &str,
+    ) -> Result<HumanTask> {
         let _guard = self.lock.lock().await;
         let task = HumanTask {
             id: uuid::Uuid::new_v4().to_string(),
@@ -633,13 +824,19 @@ impl Store {
             created_at: now(),
             resolved_at: None,
         };
-        let path = self.human_tasks_dir(project_id).join(format!("{}.json", task.id));
+        let path = self
+            .human_tasks_dir(project_id)
+            .join(format!("{}.json", task.id));
         write_json(&path, &task).await?;
         Ok(task)
     }
 
     /// `project_id = None` lists across all projects (the dashboard-wide panel).
-    pub async fn list_human_tasks(&self, project_id: Option<&str>, open_only: bool) -> Result<Vec<HumanTask>> {
+    pub async fn list_human_tasks(
+        &self,
+        project_id: Option<&str>,
+        open_only: bool,
+    ) -> Result<Vec<HumanTask>> {
         let dirs: Vec<PathBuf> = match project_id {
             Some(pid) => vec![self.human_tasks_dir(pid)],
             None => {
@@ -654,7 +851,9 @@ impl Store {
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e).with_context(|| format!("reading dir {}", root.display())),
+                    Err(e) => {
+                        return Err(e).with_context(|| format!("reading dir {}", root.display()));
+                    }
                 }
                 dirs
             }
@@ -680,7 +879,9 @@ impl Store {
         let root = self.root.join("human_tasks");
         let mut entries = match fs::read_dir(&root).await {
             Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(anyhow::anyhow!("human task {id} not found")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(anyhow::anyhow!("human task {id} not found"));
+            }
             Err(e) => return Err(e).with_context(|| format!("reading dir {}", root.display())),
         };
         while let Some(dir_entry) = entries.next_entry().await? {
@@ -709,7 +910,12 @@ impl Store {
         // comment in the file so it round-trips exactly.
         let millis = chrono::Utc::now().timestamp_millis();
         let id = format!("{millis}__{}", short_uuid());
-        let note = ProjectNote { id: id.clone(), project_id: project_id.to_string(), content: content.to_string(), created_at: ts.clone() };
+        let note = ProjectNote {
+            id: id.clone(),
+            project_id: project_id.to_string(),
+            content: content.to_string(),
+            created_at: ts.clone(),
+        };
         let path = self.notes_dir(project_id).join(format!("{id}.md"));
         let file_body = format!("<!-- created_at: {ts} -->\n{content}");
         write_atomic(&path, &file_body).await?;
@@ -729,10 +935,21 @@ impl Store {
             if path.extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let raw = fs::read_to_string(&path).await.with_context(|| format!("reading {}", path.display()))?;
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let raw = fs::read_to_string(&path)
+                .await
+                .with_context(|| format!("reading {}", path.display()))?;
             let (created_at, content) = split_created_at_comment(&raw);
-            out.push(ProjectNote { id: stem, project_id: project_id.to_string(), content, created_at });
+            out.push(ProjectNote {
+                id: stem,
+                project_id: project_id.to_string(),
+                content,
+                created_at,
+            });
         }
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(out)
@@ -759,7 +976,9 @@ impl Store {
                     resolved.push(part);
                 }
                 std::path::Component::CurDir => {}
-                std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_) => {
                     anyhow::bail!("invalid path: {rel}");
                 }
             }
@@ -771,7 +990,10 @@ impl Store {
         let mut check = resolved.clone();
         loop {
             if let Ok(canon) = check.canonicalize() {
-                let canon_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+                let canon_root = self
+                    .root
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.root.clone());
                 if !canon.starts_with(&canon_root) {
                     anyhow::bail!("path escapes store root: {rel}");
                 }
@@ -787,18 +1009,25 @@ impl Store {
 
     /// Root-relative, forward-slash path for display/API purposes.
     fn display_path(&self, abs: &Path) -> String {
-        abs.strip_prefix(&self.root).unwrap_or(abs).to_string_lossy().replace('\\', "/")
+        abs.strip_prefix(&self.root)
+            .unwrap_or(abs)
+            .to_string_lossy()
+            .replace('\\', "/")
     }
 
     /// Browses `rel` — a directory listing if it's a dir (or the root, for
     /// `rel == ""`), or a single file's content if it's a file.
     pub async fn browse(&self, rel: &str) -> Result<BrowseResult> {
         let abs = self.resolve_path(rel)?;
-        let meta = fs::metadata(&abs).await.with_context(|| format!("reading {}", abs.display()))?;
+        let meta = fs::metadata(&abs)
+            .await
+            .with_context(|| format!("reading {}", abs.display()))?;
 
         if meta.is_dir() {
             let mut entries = Vec::new();
-            let mut rd = fs::read_dir(&abs).await.with_context(|| format!("reading dir {}", abs.display()))?;
+            let mut rd = fs::read_dir(&abs)
+                .await
+                .with_context(|| format!("reading dir {}", abs.display()))?;
             while let Some(entry) = rd.next_entry().await? {
                 let name = entry.file_name().to_string_lossy().to_string();
                 // Hide dotfiles/dirs (notably `.git`, the state repo's own
@@ -818,13 +1047,27 @@ impl Store {
                 });
             }
             entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-            Ok(BrowseResult::Dir { path: self.display_path(&abs), entries })
+            Ok(BrowseResult::Dir {
+                path: self.display_path(&abs),
+                entries,
+            })
         } else {
             if meta.len() > MAX_BROWSABLE_FILE_BYTES {
-                anyhow::bail!("file too large to browse ({} bytes, max {})", meta.len(), MAX_BROWSABLE_FILE_BYTES);
+                anyhow::bail!(
+                    "file too large to browse ({} bytes, max {})",
+                    meta.len(),
+                    MAX_BROWSABLE_FILE_BYTES
+                );
             }
-            let content = fs::read_to_string(&abs).await.with_context(|| format!("reading {} (not valid UTF-8?)", abs.display()))?;
-            Ok(BrowseResult::File { path: self.display_path(&abs), content, size: meta.len(), modified_at: modified_rfc3339(&meta) })
+            let content = fs::read_to_string(&abs)
+                .await
+                .with_context(|| format!("reading {} (not valid UTF-8?)", abs.display()))?;
+            Ok(BrowseResult::File {
+                path: self.display_path(&abs),
+                content,
+                size: meta.len(),
+                modified_at: modified_rfc3339(&meta),
+            })
         }
     }
 
@@ -847,16 +1090,22 @@ impl Store {
     pub async fn delete_file(&self, rel: &str) -> Result<()> {
         let _guard = self.lock.lock().await;
         let abs = self.resolve_path(rel)?;
-        let meta = fs::metadata(&abs).await.with_context(|| format!("reading {}", abs.display()))?;
+        let meta = fs::metadata(&abs)
+            .await
+            .with_context(|| format!("reading {}", abs.display()))?;
         if meta.is_dir() {
             anyhow::bail!("{rel} is a directory, refusing to delete");
         }
-        fs::remove_file(&abs).await.with_context(|| format!("removing {}", abs.display()))
+        fs::remove_file(&abs)
+            .await
+            .with_context(|| format!("removing {}", abs.display()))
     }
 }
 
 fn modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
-    meta.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
+    meta.modified()
+        .ok()
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
 }
 
 /// Splits the leading `<!-- created_at: ... -->` line written by
@@ -893,7 +1142,8 @@ fn extract_comment_field(raw: &str, key: &str) -> Option<String> {
 /// `<!-- created_at: ... -->` convention used for project notes.
 fn parse_archetype(slug: &str, raw: &str) -> Archetype {
     let name = extract_comment_field(raw, "name").unwrap_or_else(|| slug.to_string());
-    let preferred_model = extract_comment_field(raw, "preferred_model").unwrap_or_else(default_archetype_model);
+    let preferred_model =
+        extract_comment_field(raw, "preferred_model").unwrap_or_else(default_archetype_model);
     // Body is everything after the two comment lines and the blank line that
     // follows them — find the first blank line and take everything after.
     let description = raw
@@ -902,13 +1152,20 @@ fn parse_archetype(slug: &str, raw: &str) -> Archetype {
         .unwrap_or_default()
         .trim()
         .to_string();
-    Archetype { slug: slug.to_string(), name, description, preferred_model }
+    Archetype {
+        slug: slug.to_string(),
+        name,
+        description,
+        preferred_model,
+    }
 }
 
 fn serialize_archetype(archetype: &Archetype) -> String {
     format!(
         "<!-- name: {} -->\n<!-- preferred_model: {} -->\n\n{}\n",
-        archetype.name, archetype.preferred_model, archetype.description.trim()
+        archetype.name,
+        archetype.preferred_model,
+        archetype.description.trim()
     )
 }
 

@@ -4,7 +4,7 @@
 //! conductor itself and the vape instances it spawns, is settings-UI
 //! adjustable — see `resolve_model` and `api::get_settings`/`update_settings`.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 
 use crate::store::Store;
@@ -22,14 +22,32 @@ impl OpenRouterClient {
     /// `model` resolution is env-only here — use `Conductor::from_sources`
     /// for the DB-aware (settings-UI) version used at runtime.
     pub fn new() -> Self {
-        let api_key = std::env::var("OPENROUTER_API_KEY").ok().filter(|s| !s.is_empty());
+        let api_key = std::env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
         let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        Self { http: reqwest::Client::new(), api_key, model }
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("conductor HTTP client"),
+            api_key,
+            model,
+        }
     }
 
     pub fn with_model(model: String) -> Self {
-        let api_key = std::env::var("OPENROUTER_API_KEY").ok().filter(|s| !s.is_empty());
-        Self { http: reqwest::Client::new(), api_key, model }
+        let api_key = std::env::var("OPENROUTER_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("conductor HTTP client"),
+            api_key,
+            model,
+        }
     }
 
     pub fn enabled(&self) -> bool {
@@ -37,7 +55,10 @@ impl OpenRouterClient {
     }
 
     pub async fn decide(&self, system: &str, user: &str) -> Result<String> {
-        let api_key = self.api_key.as_ref().ok_or_else(|| anyhow!("OPENROUTER_API_KEY not set"))?;
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("OPENROUTER_API_KEY not set"))?;
 
         let body = json!({
             "model": self.model,
@@ -51,7 +72,8 @@ impl OpenRouterClient {
         // Override for local testing against a mock server — mirrors
         // vape_client.rs's CADMIUM_VAPE_URL pattern. Not meant for production
         // use (there's only one real OpenRouter endpoint).
-        let url = std::env::var("OPENROUTER_API_URL").unwrap_or_else(|_| OPENROUTER_API_URL.to_string());
+        let url =
+            std::env::var("OPENROUTER_API_URL").unwrap_or_else(|_| OPENROUTER_API_URL.to_string());
         let resp = self
             .http
             .post(url)
@@ -67,7 +89,8 @@ impl OpenRouterClient {
             return Err(anyhow!("OpenRouter API {status}: {text}"));
         }
 
-        let parsed: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("failed to parse OpenRouter response: {text}"))?;
+        let parsed: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse OpenRouter response: {text}"))?;
         let content = parsed
             .get("choices")
             .and_then(|c| c.as_array())
@@ -79,7 +102,9 @@ impl OpenRouterClient {
             .to_string();
 
         if content.is_empty() {
-            return Err(anyhow!("OpenRouter response had no message content: {text}"));
+            return Err(anyhow!(
+                "OpenRouter response had no message content: {text}"
+            ));
         }
         Ok(content)
     }
@@ -108,7 +133,10 @@ pub async fn resolve_model(store: &Store, db_key: &str, env_key: &str, default: 
             return v;
         }
     }
-    std::env::var(env_key).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| default.to_string())
+    std::env::var(env_key)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 impl Conductor {
@@ -128,7 +156,8 @@ impl Conductor {
     /// heartbeat tick so a model saved through the settings UI takes effect
     /// on the very next tick, no restart.
     pub async fn from_sources(store: &Store) -> Self {
-        let model = resolve_model(store, "conductor_model", "OPENROUTER_MODEL", DEFAULT_MODEL).await;
+        let model =
+            resolve_model(store, "conductor_model", "OPENROUTER_MODEL", DEFAULT_MODEL).await;
         let client = OpenRouterClient::with_model(model);
         if client.enabled() {
             Conductor::OpenRouter(client)
@@ -179,7 +208,13 @@ impl Conductor {
     /// creation.
     /// Optional serialized archetype and Kanban context lets an opening
     /// message select existing Assigned work as well as a fitting persona.
-    pub async fn compose_initial_prompt(&self, project_name: &str, goal: &str, archetypes_json: Option<&str>, kanban_json: Option<&str>) -> Result<String> {
+    pub async fn compose_initial_prompt(
+        &self,
+        project_name: &str,
+        goal: &str,
+        archetypes_json: Option<&str>,
+        kanban_json: Option<&str>,
+    ) -> Result<String> {
         const SYSTEM: &str = "You are opening a new coding-agent session on behalf of a developer. \
             Write the first message to the agent, in your own words, directing it toward the \
             goal below. Be concrete and actionable — give the agent clear direction on how to \

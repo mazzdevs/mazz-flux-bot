@@ -1,9 +1,25 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::models::{AgentStatus, Constellation, CreateInstanceRequest, PidaSession, PidaStatus, VapeInstance};
+use crate::models::{
+    AgentStatus, Constellation, CreateInstanceRequest, PidaSession, PidaStatus, VapeInstance,
+};
+
+/// Only confirmed no-create failures allow another create on the same relationship.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateFailure {
+    #[error("{0}")]
+    Definitive(String),
+    #[error("{0}")]
+    Ambiguous(String),
+}
+impl CreateFailure {
+    pub fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous(_))
+    }
+}
 
 const DEFAULT_BASE_URL: &str = "https://vape.stable.dexus.io";
 
@@ -19,6 +35,13 @@ pub struct VapeClient {
     /// point is driving real vape instances, so dry-run is the opt-in
     /// escape hatch now, not the default.
     pub live: bool,
+    cache: tokio::sync::Mutex<
+        Option<(
+            std::time::Instant,
+            String,
+            std::result::Result<Vec<VapeInstance>, String>,
+        )>,
+    >,
 }
 
 impl VapeClient {
@@ -31,11 +54,23 @@ impl VapeClient {
         let base_url = std::env::var("CADMIUM_VAPE_URL")
             .or_else(|_| std::env::var("VAPE_MANAGER_URL"))
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let live = std::env::var("MAZZ_FLUX_LIVE").map(|v| v != "0" && !v.eq_ignore_ascii_case("false")).unwrap_or(true);
+        let live = std::env::var("MAZZ_FLUX_LIVE")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
         if !live {
-            warn!("MAZZ_FLUX_LIVE=0 — mutating vape calls (create/start/stop/delete/send) will be logged but NOT fired");
+            warn!(
+                "MAZZ_FLUX_LIVE=0 — mutating vape calls (create/start/stop/delete/send) will be logged but NOT fired"
+            );
         }
-        Self { http: reqwest::Client::new(), base_url, live }
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .expect("HTTP client"),
+            base_url,
+            live,
+            cache: tokio::sync::Mutex::new(None),
+        }
     }
 
     /// Same credential cadmium uses: shell out to `gh auth token`. No token
@@ -79,14 +114,20 @@ impl VapeClient {
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let body = self.get_text(path).await?;
-        serde_json::from_str(&body).with_context(|| format!("failed to parse JSON from {path}: {body}"))
+        serde_json::from_str(&body)
+            .with_context(|| format!("failed to parse JSON from {path}: {body}"))
     }
 
     /// Fires (or, in dry-run mode, logs and skips) a mutating call. Returns the
     /// parsed response on success, or a `{"dry_run": true, ...}` marker value
     /// when not live — callers should check for that key before treating the
     /// result as real.
-    async fn mutate(&self, method: reqwest::Method, path: &str, body: Option<&serde_json::Value>) -> Result<serde_json::Value> {
+    async fn mutate(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
         if !self.live {
             info!(%path, ?body, "[dry-run] would {method} {path}");
             return Ok(serde_json::json!({
@@ -103,7 +144,10 @@ impl VapeClient {
         if let Some(b) = body {
             req = req.json(b);
         }
-        let resp = req.send().await.with_context(|| format!("{method} {url} failed to send"))?;
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("{method} {url} failed to send"))?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -125,8 +169,35 @@ impl VapeClient {
     /// Returns the raw response text (for caching) alongside the parsed list.
     pub async fn list_instances(&self) -> Result<(String, Vec<VapeInstance>)> {
         let text = self.get_text("/api/v1/instances").await?;
-        let parsed: Vec<VapeInstance> = serde_json::from_str(&text).with_context(|| format!("failed to parse instance list: {text}"))?;
+        let parsed: Vec<VapeInstance> = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse instance list: {text}"))?;
         Ok((text, parsed))
+    }
+
+    pub async fn list_instances_cached(&self) -> Result<(Vec<VapeInstance>, String)> {
+        let mut cache = self.cache.lock().await;
+        if let Some((at, fetched_at, result)) = &*cache {
+            if at.elapsed() < std::time::Duration::from_secs(15) {
+                return result
+                    .clone()
+                    .map(|items| (items, fetched_at.clone()))
+                    .map_err(|error| anyhow!(error));
+            }
+        }
+        let result = self
+            .list_instances()
+            .await
+            .map(|(_, items)| items)
+            .map_err(|_| "VAPE status unavailable".to_string());
+        let fetched_at = crate::projects::timestamp();
+        *cache = Some((
+            std::time::Instant::now(),
+            fetched_at.clone(),
+            result.clone(),
+        ));
+        result
+            .map(|items| (items, fetched_at))
+            .map_err(|error| anyhow!(error))
     }
 
     pub async fn get_instance(&self, id: &str) -> Result<VapeInstance> {
@@ -134,7 +205,8 @@ impl VapeClient {
     }
 
     pub async fn agent_status(&self, id: &str) -> Result<AgentStatus> {
-        self.get_json(&format!("/api/v1/instances/{id}/agent-status")).await
+        self.get_json(&format!("/api/v1/instances/{id}/agent-status"))
+            .await
     }
 
     pub async fn list_constellations(&self) -> Result<Vec<Constellation>> {
@@ -144,36 +216,115 @@ impl VapeClient {
     // ---- Harness-scoped reads (pida-focused; bilda paths mirror these) ---
 
     pub async fn pida_status(&self, id: &str) -> Result<PidaStatus> {
-        self.get_json(&format!("/api/v1/instances/{id}/pida/api/status")).await
+        self.get_json(&format!("/api/v1/instances/{id}/pida/api/status"))
+            .await
     }
 
     pub async fn pida_session(&self, id: &str) -> Result<PidaSession> {
-        self.get_json(&format!("/api/v1/instances/{id}/pida/api/session")).await
+        self.get_json(&format!("/api/v1/instances/{id}/pida/api/session"))
+            .await
     }
 
     pub async fn pida_job_result(&self, id: &str) -> Result<serde_json::Value> {
-        self.get_json(&format!("/api/v1/instances/{id}/pida/api/job/result")).await
+        self.get_json(&format!("/api/v1/instances/{id}/pida/api/job/result"))
+            .await
     }
 
     // ---- Mutating calls (dry-run gated by MAZZ_FLUX_LIVE) ----------------
 
-    /// Not yet fired live (see PLAN.md) — path/body are high-confidence from
-    /// source + binary strings, not confirmed end-to-end.
-    pub async fn create_instance(&self, req: &CreateInstanceRequest) -> Result<serde_json::Value> {
-        let body = serde_json::to_value(req)?;
-        self.mutate(reqwest::Method::POST, "/api/v1/instances", Some(&body)).await
+    /// Validate configuration and credentials before persisting a sent-attempt marker.
+    pub async fn prepare_create(
+        &self,
+        req: &CreateInstanceRequest,
+    ) -> std::result::Result<reqwest::Request, CreateFailure> {
+        if !self.live {
+            return Err(CreateFailure::Definitive(
+                "VAPE mutations are disabled".into(),
+            ));
+        }
+        let token = self.auth_token().await.map_err(|_| {
+            CreateFailure::Definitive(
+                "VAPE authentication unavailable; correct credentials and retry".into(),
+            )
+        })?;
+        self.http
+            .post(format!("{}/api/v1/instances", self.base_url))
+            .bearer_auth(token)
+            .json(req)
+            .build()
+            .map_err(|_| {
+                CreateFailure::Definitive(
+                    "invalid VAPE request configuration; correct it and retry".into(),
+                )
+            })
+    }
+
+    pub async fn send_create(
+        &self,
+        request: reqwest::Request,
+    ) -> std::result::Result<serde_json::Value, CreateFailure> {
+        let response = self.http.execute(request).await.map_err(|error| {
+            if error.is_connect() || error.is_builder() {
+                CreateFailure::Definitive(
+                    "VAPE create could not connect; retry after correcting connectivity".into(),
+                )
+            } else {
+                CreateFailure::Ambiguous(
+                    "VAPE create timed out or transport outcome is unknown; reconcile before retry"
+                        .into(),
+                )
+            }
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            let message = format!("VAPE create returned HTTP {}", status.as_u16());
+            return Err(
+                if matches!(
+                    status.as_u16(),
+                    400 | 401 | 403 | 404 | 405 | 413 | 415 | 422 | 429
+                ) {
+                    CreateFailure::Definitive(format!(
+                        "{message}; correct the rejected request and retry"
+                    ))
+                } else {
+                    CreateFailure::Ambiguous(format!(
+                        "{message}; creation outcome uncertain, reconcile before retry"
+                    ))
+                },
+            );
+        }
+        response.json().await.map_err(|_| {
+            CreateFailure::Ambiguous(
+                "VAPE create response could not be read; reconcile before retry".into(),
+            )
+        })
     }
 
     pub async fn start_instance(&self, id: &str) -> Result<serde_json::Value> {
-        self.mutate(reqwest::Method::POST, &format!("/api/v1/instances/{id}/start"), None).await
+        self.mutate(
+            reqwest::Method::POST,
+            &format!("/api/v1/instances/{id}/start"),
+            None,
+        )
+        .await
     }
 
     pub async fn stop_instance(&self, id: &str) -> Result<serde_json::Value> {
-        self.mutate(reqwest::Method::POST, &format!("/api/v1/instances/{id}/stop"), None).await
+        self.mutate(
+            reqwest::Method::POST,
+            &format!("/api/v1/instances/{id}/stop"),
+            None,
+        )
+        .await
     }
 
     pub async fn delete_instance(&self, id: &str) -> Result<serde_json::Value> {
-        self.mutate(reqwest::Method::DELETE, &format!("/api/v1/instances/{id}"), None).await
+        self.mutate(
+            reqwest::Method::DELETE,
+            &format!("/api/v1/instances/{id}"),
+            None,
+        )
+        .await
     }
 
     /// `POST /api/v1/instances/{id}/rename` — path extracted from the cadmium
@@ -181,14 +332,24 @@ impl VapeClient {
     /// rename control.
     pub async fn rename_instance(&self, id: &str, name: &str) -> Result<serde_json::Value> {
         let body = serde_json::json!({ "name": name });
-        self.mutate(reqwest::Method::POST, &format!("/api/v1/instances/{id}/rename"), Some(&body)).await
+        self.mutate(
+            reqwest::Method::POST,
+            &format!("/api/v1/instances/{id}/rename"),
+            Some(&body),
+        )
+        .await
     }
 
     /// `POST .../pida/api/chat` — send a message into the instance's live pida
     /// session (steer it, answer a question in prose, etc).
     pub async fn pida_send(&self, id: &str, message: &str) -> Result<serde_json::Value> {
         let body = serde_json::json!({ "message": message });
-        self.mutate(reqwest::Method::POST, &format!("/api/v1/instances/{id}/pida/api/chat"), Some(&body)).await
+        self.mutate(
+            reqwest::Method::POST,
+            &format!("/api/v1/instances/{id}/pida/api/chat"),
+            Some(&body),
+        )
+        .await
     }
 }
 
