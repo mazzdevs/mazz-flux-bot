@@ -22,5 +22,6 @@ metalcraft = "0.11.0"
 async-trait = "0.1"
 
 [dev-dependencies]
+tokio-stream = "0.1"
 spice-framework = "0.2.0"
 tower = { version = "0.5", features = ["util"] }
