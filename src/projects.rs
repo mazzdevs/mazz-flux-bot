@@ -1,4 +1,4 @@
-//! Project v2 records. Automation retains its existing internal view; the wire
+//! Project schema-v3 records. Automation retains its existing internal view; the wire
 //! record deliberately separates manual delivery status from runtime state.
 use crate::models::Project;
 use serde::{Deserialize, Serialize};
@@ -22,12 +22,23 @@ pub enum DeliveryStatus {
     FlagsCleaned,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    #[default]
+    BootstrapOnly,
+    NativeGoal,
+    LegacyConductor,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectTracking {
     #[serde(default)]
     pub schema_version: u32,
     #[serde(default)]
     pub revision: u64,
+    #[serde(default)]
+    pub execution_mode: ExecutionMode,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -149,7 +160,7 @@ pub struct Automation {
     pub last_note: Option<String>,
 }
 
-/// Reads the legacy shape and writes only the canonical v2 shape. No singular
+/// Reads the legacy shape and writes only the canonical v3 shape. No singular
 /// instance projection is persisted after the relationship migration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRecord {
@@ -159,7 +170,10 @@ pub struct ProjectRecord {
     pub revision: u64,
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub goal: String,
+    #[serde(default)]
+    pub execution_mode: Option<ExecutionMode>,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -196,7 +210,7 @@ pub struct ProjectRecord {
 impl TryFrom<ProjectRecord> for Project {
     type Error = anyhow::Error;
     fn try_from(r: ProjectRecord) -> anyhow::Result<Self> {
-        if r.schema_version > 2 {
+        if r.schema_version > 3 {
             anyhow::bail!("unsupported project schema");
         }
         let delivery_status = if r.schema_version >= 2 {
@@ -231,6 +245,13 @@ impl TryFrom<ProjectRecord> for Project {
             tracking: ProjectTracking {
                 schema_version: r.schema_version,
                 revision: r.revision,
+                execution_mode: if r.schema_version < 3 {
+                    ExecutionMode::LegacyConductor
+                } else {
+                    r.execution_mode.ok_or_else(|| {
+                        failure("validation_error", "schema 3 requires execution_mode")
+                    })?
+                },
                 description: r.description,
                 delivery_status,
                 archived_at: r.archived_at,
@@ -247,11 +268,12 @@ impl From<Project> for ProjectRecord {
     fn from(p: Project) -> Self {
         let t = p.tracking;
         Self {
-            schema_version: 2,
+            schema_version: 3,
             revision: t.revision,
             id: p.id,
             name: p.name,
             goal: p.goal,
+            execution_mode: Some(t.execution_mode),
             description: t.description,
             heartbeat_prompt: p.heartbeat_prompt,
             constellation: p.constellation,

@@ -453,7 +453,7 @@
     },
     "/api/v2/projects/{pid}/archive": {
       "post": {
-        "summary": "Archive and pause without stopping instances",
+        "summary": "Archive local tracking; refuses active/evaluating/unknown native goal or unresolved dispatch",
         "parameters": [
           {
             "name": "pid",
@@ -651,7 +651,7 @@
     },
     "/api/v2/projects/{pid}/start": {
       "post": {
-        "summary": "Provision default primary if empty; enable primary heartbeat only",
+        "summary": "Initialize/resume primary; persist pending native context bootstrap until ready; no inferred native condition",
         "parameters": [
           {
             "name": "pid",
@@ -750,7 +750,7 @@
     },
     "/api/v2/projects/{pid}/pause": {
       "post": {
-        "summary": "Pause primary heartbeat without stopping instances",
+        "summary": "Pause local monitoring only; does not pause Flux Goal Loop",
         "parameters": [
           {
             "name": "pid",
@@ -5480,6 +5480,303 @@
           }
         }
       }
+    },
+    "/api/v2/projects/{pid}/execution": {
+      "get": {
+        "summary": "Observe native state and execution receipts; unknown never means success",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict, stale revision, archived, missing primary or uncertain provision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input or read-only field",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage/internal failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{pid}/execution/mode": {
+      "post": {
+        "summary": "Explicitly select execution owner and pause monitoring; launches no work",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "revision"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict, stale revision, archived, missing primary or uncertain provision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input or read-only field",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage/internal failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModeWrite"
+              }
+            }
+          }
+        },
+        "description": "Explicit mode selection launches no work and pauses local monitoring. Transfer away from native requires terminal/no_goal with resolved receipts; active, evaluating, paused and unknown states block it."
+      }
+    },
+    "/api/v2/projects/{pid}/execution/goals/{action}": {
+      "post": {
+        "summary": "Request exact native start, resume, or clear; acceptance pending observation; clear is not abort",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "start",
+                "resume",
+                "clear"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "request_id": {
+                      "type": "string"
+                    },
+                    "revision": {
+                      "type": "integer"
+                    },
+                    "activation": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "request_id",
+                    "revision",
+                    "activation"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict, stale revision, archived, missing primary or uncertain provision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input or read-only field",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage/internal failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoalWrite"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5931,7 +6228,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "deprecated": true
           },
           "heartbeat_prompt_override": {
             "anyOf": [
@@ -5941,7 +6239,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "deprecated": true
           },
           "created_by": {
             "type": "string",
@@ -5997,8 +6296,9 @@
           },
           "goal": {
             "type": "string",
-            "description": "Optional automation direction. May be empty for tracking-only projects; required before automation or new instance provisioning.",
-            "default": ""
+            "description": "Deprecated legacy conductor data only. Native goals use exact explicit Flux conditions; bootstrap never infers a condition.",
+            "default": "",
+            "deprecated": true
           },
           "description": {
             "type": "string"
@@ -6014,7 +6314,9 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "deprecated": true,
+            "description": "Deprecated legacy conductor data only. Native goals use exact explicit Flux conditions; bootstrap never infers a condition."
           },
           "constellation": {
             "type": "string",
@@ -6064,7 +6366,8 @@
           },
           "goal": {
             "type": "string",
-            "description": "Optional automation direction. Empty clears the goal. If no nonblank primary override remains, clearing the last direction pauses heartbeat automation; restoring direction requires explicit Start."
+            "description": "Deprecated legacy conductor data only. Native goals use exact explicit Flux conditions; bootstrap never infers a condition.",
+            "deprecated": true
           },
           "description": {
             "type": "string"
@@ -6080,7 +6383,9 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "deprecated": true,
+            "description": "Deprecated legacy conductor data only. Native goals use exact explicit Flux conditions; bootstrap never infers a condition."
           },
           "constellation": {
             "type": "string",
@@ -6135,7 +6440,7 @@
           },
           "schema_version": {
             "type": "integer",
-            "const": 2,
+            "const": 3,
             "readOnly": true
           },
           "revision": {
@@ -6149,7 +6454,8 @@
           },
           "goal": {
             "type": "string",
-            "description": "Optional automation direction. May be empty for tracking-only projects; required before automation or new instance provisioning."
+            "description": "Deprecated legacy conductor data only. Native goals use exact explicit Flux conditions; bootstrap never infers a condition.",
+            "deprecated": true
           },
           "description": {
             "type": "string"
@@ -6165,7 +6471,9 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "deprecated": true,
+            "description": "Deprecated legacy conductor data only. Native goals use exact explicit Flux conditions; bootstrap never infers a condition."
           },
           "constellation": {
             "type": "string",
@@ -6240,6 +6548,10 @@
           "updated_at": {
             "type": "string",
             "readOnly": true
+          },
+          "execution_mode": {
+            "$ref": "#/components/schemas/ExecutionMode",
+            "readOnly": true
           }
         },
         "required": [
@@ -6255,7 +6567,8 @@
           "original_jira_tickets",
           "ec_tickets",
           "vape_pages",
-          "launchdarkly_flags"
+          "launchdarkly_flags",
+          "execution_mode"
         ]
       },
       "AddInstance": {
@@ -6345,7 +6658,8 @@
                 "type": "null"
               }
             ],
-            "description": "Primary-only optional direction override. Blank or null falls back to project goal. Clearing the last effective direction pauses heartbeat automation; restoring direction does not resume it."
+            "description": "Primary-only optional direction override. Blank or null falls back to project goal. Clearing the last effective direction pauses heartbeat automation; restoring direction does not resume it.",
+            "deprecated": true
           },
           "heartbeat_prompt_override": {
             "anyOf": [
@@ -6355,7 +6669,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "deprecated": true
           },
           "is_primary": {
             "type": "boolean"
@@ -6662,7 +6977,10 @@
             "type": "boolean"
           },
           "is_streaming": {
-            "type": "boolean"
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "pending_ask": {},
           "plan_mode": {
@@ -6688,7 +7006,43 @@
               }
             ]
           },
-          "turn_liveness": {}
+          "turn_liveness": {},
+          "is_compacting": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "active_subagents": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_turn_settled_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "auto_mode": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
         },
         "required": [
           "ready",
@@ -6697,7 +7051,13 @@
           "plan_mode",
           "handoff",
           "model",
-          "turn_liveness"
+          "turn_liveness",
+          "is_compacting",
+          "active_subagents",
+          "last_turn_settled_at",
+          "session_id",
+          "auto_mode",
+          "capabilities"
         ]
       },
       "InstanceStatusResponse": {
@@ -6733,6 +7093,259 @@
           "pida_status"
         ],
         "additionalProperties": false
+      },
+      "ExecutionMode": {
+        "type": "string",
+        "enum": [
+          "bootstrap_only",
+          "native_goal",
+          "legacy_conductor"
+        ],
+        "description": "Bootstrap-only is default for new projects. Schema-v2 records migrate to legacy_conductor without launching or converting work."
+      },
+      "GoalObservation": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "no_goal",
+              "active",
+              "evaluating",
+              "paused",
+              "terminal"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "condition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "verdict": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "native": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "fetched_at": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "session_id",
+          "condition",
+          "started_at",
+          "verdict",
+          "terminal_reason",
+          "terminal_fingerprint",
+          "native",
+          "fetched_at",
+          "error"
+        ],
+        "description": "Only complete valid structured SSE evidence is actionable. Malformed/incomplete data or total-deadline cutoff makes state unknown. Latest terminal fingerprint remains available during active/paused states for baseline attribution; unchanged/off-condition terminal rows never settle receipts."
+      },
+      "ExecutionReceipt": {
+        "type": "object",
+        "description": "Immutable request file. Mutable observations are separate; HTTP acceptance does not prove activation. Each receipt is returned with separate progress, including HTTP dispatch state and observed session/goal identity, fetch time and exact verdict/terminal reason. Requests are never automatically replayed.",
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "relationship_id": {
+            "type": "string"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "resume",
+              "clear"
+            ]
+          },
+          "condition": {
+            "type": "string"
+          },
+          "condition_sha256": {
+            "type": "string"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "baseline": {
+            "$ref": "#/components/schemas/GoalObservation"
+          }
+        },
+        "required": [
+          "request_id",
+          "project_id",
+          "relationship_id",
+          "instance_id",
+          "session_id",
+          "action",
+          "condition",
+          "condition_sha256",
+          "actor",
+          "created_at",
+          "baseline"
+        ]
+      },
+      "ExecutionProgress": {
+        "type": "object",
+        "properties": {
+          "dispatch_status": {
+            "type": "string",
+            "enum": [
+              "dispatch_unknown",
+              "pending",
+              "observed",
+              "terminal",
+              "session_changed",
+              "goal_changed"
+            ]
+          },
+          "observation": {
+            "$ref": "#/components/schemas/GoalObservation"
+          },
+          "activated_started_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "dispatch_status",
+          "observation",
+          "activated_started_at"
+        ]
+      },
+      "ExecutionStatus": {
+        "type": "object",
+        "properties": {
+          "execution_mode": {
+            "$ref": "#/components/schemas/ExecutionMode"
+          },
+          "observation": {
+            "$ref": "#/components/schemas/GoalObservation"
+          },
+          "receipts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "request": {
+                  "$ref": "#/components/schemas/ExecutionReceipt"
+                },
+                "progress": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ExecutionProgress"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "execution_mode",
+          "observation",
+          "receipts"
+        ]
+      },
+      "ModeWrite": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "type": "integer"
+          },
+          "execution_mode": {
+            "$ref": "#/components/schemas/ExecutionMode"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "execution_mode"
+        ]
+      },
+      "GoalWrite": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "expected_session_id": {
+            "type": "string"
+          },
+          "condition": {
+            "type": "string",
+            "description": "Required on start, exact user-authored text; trimmed maximum 4000 UTF-16 code units. Never includes bootstrap/context instructions. Conditions containing @ are rejected because Pida chat expands file mentions; use plain text or paths."
+          },
+          "expected_revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "request_id",
+          "expected_session_id"
+        ]
       }
     }
   }

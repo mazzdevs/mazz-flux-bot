@@ -20,6 +20,17 @@ pub struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if self
+            .0
+            .downcast_ref::<crate::projects::DomainError>()
+            .is_some_and(|e| e.code == "read_only_field")
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error":self.0.to_string()})),
+            )
+                .into_response();
+        }
         tracing::error!(error = %self.0, "request failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -243,22 +243,34 @@ pub struct AgentStatus {
 /// `GET /api/v1/instances/{id}/pida/api/status` — subset of fields we act on.
 /// Verified live 2026-09-03. Extra fields from the real response are dropped
 /// silently (serde ignores unknown fields by default).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PidaStatus {
     #[serde(default)]
     pub ready: bool,
-    #[serde(default)]
-    pub is_streaming: bool,
-    #[serde(default)]
+    #[serde(default, alias = "isStreaming")]
+    pub is_streaming: Option<bool>,
+    #[serde(default, alias = "pendingAsk")]
     pub pending_ask: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, alias = "planMode")]
     pub plan_mode: bool,
     #[serde(default)]
     pub handoff: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "turnLiveness")]
     pub turn_liveness: Option<serde_json::Value>,
+    #[serde(default, alias = "isCompacting")]
+    pub is_compacting: Option<bool>,
+    #[serde(default, alias = "lastTurnSettledAt")]
+    pub last_turn_settled_at: Option<String>,
+    #[serde(default, alias = "activeSubagents")]
+    pub active_subagents: Option<u64>,
+    #[serde(default, alias = "sessionId")]
+    pub session_id: Option<String>,
+    #[serde(default, alias = "autoMode")]
+    pub auto_mode: Option<bool>,
+    #[serde(default)]
+    pub capabilities: Option<serde_json::Value>,
 }
 
 /// `GET /api/v1/instances/{id}/pida/api/session` — verified live. Kept generic
@@ -282,6 +294,8 @@ pub struct PidaSession {
 /// it in anger.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateInstanceRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub name: String,
     pub constellation: String,
     #[serde(skip_serializing_if = "Option::is_none")]

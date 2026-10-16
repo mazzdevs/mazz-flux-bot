@@ -196,11 +196,8 @@ createForm.addEventListener("submit", async (ev) => {
 
   const name = document.getElementById("name").value.trim();
   const constellation = document.getElementById("constellation").value.trim();
-  const goal = document.getElementById("goal").value.trim();
-  const heartbeatPrompt = document.getElementById("heartbeat-prompt").value.trim();
-  const body = { constellation, goal, description: document.getElementById("description").value, status: document.getElementById("delivery-status").value };
+  const body = { constellation, description: document.getElementById("description").value, status: document.getElementById("delivery-status").value };
   if (name) body.name = name;
-  if (heartbeatPrompt) body.heartbeat_prompt = heartbeatPrompt;
 
   creatingProject = true;
   createForm.setAttribute("aria-busy", "true");

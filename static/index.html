@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>mazz-flux-bot</title>
-  <link rel="stylesheet" href="/style.css?v=9" />
+  <link rel="stylesheet" href="/style.css?v=10" />
   <script>
     // Set the theme before first paint to avoid a flash of the wrong theme.
     (function () {
@@ -86,18 +86,13 @@
     <form id="create-form">
       <h2><svg class="icon"><use href="/icons.svg#icon-plus"></use></svg> New project</h2>
       <label>Name (optional)</label>
-      <input type="text" id="name" placeholder="Optional — generated from a goal when one is provided" />
+      <input type="text" id="name" placeholder="Project name (optional)" />
       <label for="description">Description</label><textarea id="description" placeholder="Project context and purpose"></textarea>
       <label for="delivery-status">Delivery status</label><select id="delivery-status"><option value="pending">Pending</option><option value="in_progress">In Progress</option><option value="review">Review</option><option value="merged">Merged</option><option value="flags_enabled">Flags Enabled</option><option value="flags_cleaned">Flags Cleaned</option></select>
       <label>Constellation</label>
       <input type="text" id="constellation" list="constellations" placeholder="e.g. back-office" required />
       <datalist id="constellations"></datalist>
-      <label>Goal prompt (optional)</label>
-      <textarea id="goal" placeholder="Add automation direction now or later"></textarea>
-      <p class="sub" style="margin-top:0.25rem">Leave blank for a tracking-only project. Add a goal later before starting automation.</p>
-      <label>Heartbeat prompt (optional)</label>
-      <textarea id="heartbeat-prompt" placeholder="what should each check-in focus on?"></textarea>
-      <p class="sub" style="margin-top:0.25rem">Direction for periodic check-ins — the conductor composes the actual message, keeping the goal in mind too.</p>
+      <p class="sub">New projects use context bootstrap only. Start can initialize a primary Flux instance without an automation goal. Select Flux Goal Loop later to run an explicit condition.</p>
       <div class="dialog-actions">
         <button type="button" id="create-close" class="btn-secondary">Cancel</button>
         <button type="submit" id="create-submit" class="btn">
@@ -235,7 +230,7 @@
   </main>
 
   <script src="/theme.js"></script>
-  <script src="/app.js?v=9"></script>
+  <script src="/app.js?v=10"></script>
   <script src="/archetypes.js?v=2"></script>
   <script src="/files.js"></script>
 </body>

@@ -562,6 +562,9 @@ async fn restore(
 }
 async fn archive_as(state: &AppState, id: &str, rev: u64, archived: bool) -> Result<Json<Value>> {
     let _guard = state.store.project_guard(id).await?;
+    if archived {
+        crate::execution::archive_guard(state, &state.store.require_project(id).await?).await?;
+    }
     state.store.set_archived(id, rev, archived).await?;
     audit(
         state,
@@ -738,6 +741,9 @@ async fn patch_instance(
         .relationships(&pid)
         .await?
         .primary_instance_relationship_id;
+    if req.is_primary.is_some() {
+        crate::execution::archive_guard(&state, &state.store.require_project(&pid).await?).await?;
+    }
     state
         .store
         .edit_relationship(&pid, &rid, req.expected_revision, req.is_primary, |r| {
@@ -770,6 +776,16 @@ async fn detach(
     Input(req): Input<Revision>,
 ) -> Result<Json<Value>> {
     let _guard = state.store.project_guard(&pid).await?;
+    if state
+        .store
+        .relationships(&pid)
+        .await?
+        .primary_instance_relationship_id
+        .as_deref()
+        == Some(&rid)
+    {
+        crate::execution::archive_guard(&state, &state.store.require_project(&pid).await?).await?;
+    }
     state
         .store
         .detach_relationship(&pid, &rid, req.expected_revision)
@@ -789,7 +805,9 @@ pub async fn provision(state: &AppState, pid: &str, rid: &str) -> anyhow::Result
     let all = state.store.relationships(pid).await?;
     let primary = all.primary_instance_relationship_id.as_deref() == Some(rid);
     let goal = effective_goal(&p, if primary { Some(&rel) } else { None });
-    require_automation_goal(goal)?;
+    if p.tracking.execution_mode == ExecutionMode::LegacyConductor {
+        require_automation_goal(goal)?;
+    }
     if !state.vape.live {
         return Err(failure(
             "dry_run",
@@ -825,20 +843,24 @@ pub async fn provision(state: &AppState, pid: &str, rid: &str) -> anyhow::Result
             "prior create may have reached VAPE; no labeled instance found yet. Retry reconciliation later; do not duplicate the request",
         ));
     }
-    let c = crate::conductor::Conductor::from_sources(&state.store).await;
-    let archetypes = serde_json::to_string(&state.store.list_archetypes().await?)?;
-    let board = serde_json::to_string(&state.store.get_kanban_board(pid).await?)?;
-    let composed = c
-        .compose_initial_prompt(
-            &p.name,
-            goal,
-            Some(&archetypes),
-            if primary { Some(&board) } else { None },
-        )
-        .await
-        .unwrap_or_else(|_| goal.into());
-    let resolution = crate::public_url::resolve_public_url(&state.store).await;
-    let (prompt, _) = crate::heartbeat::apply_live_agent_context(composed, pid, &resolution);
+    let job_prompt = if p.tracking.execution_mode == ExecutionMode::LegacyConductor {
+        let c = crate::conductor::Conductor::from_sources(&state.store).await;
+        let archetypes = serde_json::to_string(&state.store.list_archetypes().await?)?;
+        let board = serde_json::to_string(&state.store.get_kanban_board(pid).await?)?;
+        let composed = c
+            .compose_initial_prompt(
+                &p.name,
+                goal,
+                Some(&archetypes),
+                if primary { Some(&board) } else { None },
+            )
+            .await
+            .unwrap_or_else(|_| goal.into());
+        let resolution = crate::public_url::resolve_public_url(&state.store).await;
+        Some(crate::heartbeat::apply_live_agent_context(composed, pid, &resolution).0)
+    } else {
+        None
+    };
     let model = match rel.model {
         Some(m) => m,
         None => {
@@ -857,11 +879,16 @@ pub async fn provision(state: &AppState, pid: &str, rid: &str) -> anyhow::Result
         &rid[..8.min(rid.len())]
     );
     let req = CreateInstanceRequest {
+        model: if job_prompt.is_none() {
+            Some(model.clone())
+        } else {
+            None
+        },
         name,
         constellation: rel.constellation,
         subdomain: None,
         ticket: None,
-        job: Some(JobConfig {
+        job: job_prompt.map(|prompt| JobConfig {
             prompt,
             harness: Some("pida".into()),
             model: Some(model),
@@ -934,7 +961,9 @@ pub async fn ensure_primary(state: &AppState, pid: &str) -> anyhow::Result<Relat
     let mut all = state.store.relationships(pid).await?;
     let p = state.store.require_project(pid).await?;
     let goal = effective_goal(&p, all.primary());
-    require_automation_goal(goal)?;
+    if p.tracking.execution_mode == ExecutionMode::LegacyConductor {
+        require_automation_goal(goal)?;
+    }
     if all.instances.is_empty() {
         let r = Relationship::pending(&p, "Primary".into(), p.constellation.clone(), None);
         state
@@ -960,7 +989,19 @@ async fn start(
         .store
         .check_writable(&pid, r.expected_revision)
         .await?;
-    ensure_primary(&state, &pid).await?;
+    let primary = ensure_primary(&state, &pid).await?;
+    let p = state.store.require_project(&pid).await?;
+    if p.tracking.execution_mode != ExecutionMode::LegacyConductor {
+        let outcome = if p.tracking.execution_mode == ExecutionMode::NativeGoal {
+            crate::execution::initialize(&state, &p, &primary).await?
+        } else {
+            crate::execution::bootstrap(&state, &p, &primary).await?
+        };
+        state
+            .store
+            .touch_heartbeat(&pid, Some(&outcome.note))
+            .await?;
+    }
     state
         .store
         .set_project_status_only(&pid, ProjectStatus::Running)
@@ -1504,6 +1545,108 @@ async fn delete_task(
     acknowledgement(&state, &pid, json!({"ok":true})).await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModeWrite {
+    expected_revision: u64,
+    execution_mode: ExecutionMode,
+}
+async fn execution_mode(
+    State(state): State<AppState>,
+    Path(pid): Path<String>,
+    Input(req): Input<ModeWrite>,
+) -> Result<Json<Value>> {
+    let _guard = state.store.project_guard(&pid).await?;
+    let p = state
+        .store
+        .check_writable(&pid, req.expected_revision)
+        .await?;
+    if p.tracking.execution_mode == ExecutionMode::NativeGoal
+        && req.execution_mode != p.tracking.execution_mode
+    {
+        crate::execution::mode_switch_guard(&state, &p).await?;
+    }
+    state
+        .store
+        .mutate_project(&pid, req.expected_revision, |p| {
+            p.tracking.execution_mode = req.execution_mode;
+            p.heartbeat_enabled = false;
+            p.status = "paused".into();
+            Ok(())
+        })
+        .await?;
+    audit(
+        &state,
+        &pid,
+        None,
+        "execution_mode_selected_monitoring_paused",
+    )
+    .await?;
+    acknowledgement(&state, &pid, json!({"ok":true})).await
+}
+async fn execution_status(
+    State(state): State<AppState>,
+    Path(pid): Path<String>,
+) -> Result<Json<Value>> {
+    let _guard = state.store.project_guard(&pid).await?;
+    let p = state.store.require_project(&pid).await?;
+    let observation = if p.tracking.archived_at.is_none()
+        && p.tracking.execution_mode == ExecutionMode::NativeGoal
+    {
+        crate::execution::monitor(&state, &p).await?
+    } else {
+        crate::execution::GoalObservation::unknown(
+            "Native monitoring not selected or project archived",
+        )
+    };
+    let mut receipts = vec![];
+    for request in state.store.execution_receipts(&pid).await? {
+        let progress = state
+            .store
+            .execution_observation(&pid, &request.request_id)
+            .await?;
+        receipts.push(json!({"request":request,"progress":progress}));
+    }
+    Ok(Json(
+        json!({"execution_mode":p.tracking.execution_mode,"observation":observation,"receipts":receipts}),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalWrite {
+    expected_revision: u64,
+    request_id: String,
+    expected_session_id: String,
+    #[serde(default)]
+    condition: Option<String>,
+}
+async fn native_goal_action(
+    State(state): State<AppState>,
+    Path((pid, action)): Path<(String, String)>,
+    Input(req): Input<GoalWrite>,
+) -> Result<Json<Value>> {
+    let _guard = state.store.project_guard(&pid).await?;
+    let p = state
+        .store
+        .check_writable(&pid, req.expected_revision)
+        .await?;
+    crate::execution::native_action(
+        &state,
+        &p,
+        &req.request_id,
+        &req.expected_session_id,
+        &action,
+        req.condition.as_deref(),
+    )
+    .await?;
+    acknowledgement(
+        &state,
+        &pid,
+        json!({"ok":true,"request_id":req.request_id,"activation":"pending_observation"}),
+    )
+    .await
+}
+
 async fn openapi() -> Json<Value> {
     Json(
         serde_json::from_str(include_str!("../docs/openapi.json"))
@@ -1536,6 +1679,15 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/v2/projects/{pid}/archive", post(archive))
         .route("/api/v2/projects/{pid}/restore", post(restore))
+        .route("/api/v2/projects/{pid}/execution", get(execution_status))
+        .route(
+            "/api/v2/projects/{pid}/execution/mode",
+            post(execution_mode),
+        )
+        .route(
+            "/api/v2/projects/{pid}/execution/goals/{action}",
+            post(native_goal_action),
+        )
         .route("/api/v2/projects/{pid}/start", post(start))
         .route("/api/v2/projects/{pid}/pause", post(pause))
         .route("/api/v2/projects/{pid}/heartbeat/force", post(force))

@@ -209,7 +209,7 @@ impl Store {
         let ts = now();
         let project = Project {
             tracking: crate::projects::ProjectTracking {
-                schema_version: 2,
+                schema_version: 3,
                 revision: 1,
                 ..Default::default()
             },
@@ -1071,12 +1071,42 @@ impl Store {
         }
     }
 
+    /// Guard both the requested namespace and its canonical destination, so
+    /// an alias inside the store cannot erase execution/no-replay evidence.
+    fn require_file_mutable(&self, path: &Path) -> Result<()> {
+        let protected = |root: &Path, candidate: &Path| {
+            candidate.starts_with(root.join("executions"))
+                || candidate.starts_with(root.join("bootstrap"))
+        };
+        let mut denied = protected(&self.root, path);
+        let root = self.root.canonicalize()?;
+        let mut ancestor = path;
+        loop {
+            if let Ok(canonical) = ancestor.canonicalize() {
+                denied |= protected(&root, &canonical);
+                break;
+            }
+            let Some(parent) = ancestor.parent() else {
+                break;
+            };
+            ancestor = parent;
+        }
+        if denied {
+            return Err(crate::projects::failure(
+                "read_only_field",
+                "Execution receipts and bootstrap guards are read-only in Files; use domain lifecycle operations",
+            ));
+        }
+        Ok(())
+    }
+
     /// Overwrites (or creates) a file at `rel` with `content`, creating
     /// parent directories as needed. Rejects paths that resolve to an
     /// existing directory.
     pub async fn write_file(&self, rel: &str, content: &str) -> Result<()> {
         let _guard = self.lock.lock().await;
         let abs = self.resolve_path(rel)?;
+        self.require_file_mutable(&abs)?;
         if let Ok(meta) = fs::metadata(&abs).await {
             if meta.is_dir() {
                 anyhow::bail!("{rel} is a directory");
@@ -1090,6 +1120,7 @@ impl Store {
     pub async fn delete_file(&self, rel: &str) -> Result<()> {
         let _guard = self.lock.lock().await;
         let abs = self.resolve_path(rel)?;
+        self.require_file_mutable(&abs)?;
         let meta = fs::metadata(&abs)
             .await
             .with_context(|| format!("reading {}", abs.display()))?;

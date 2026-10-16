@@ -736,6 +736,7 @@ dependencies = [
  "spice-framework",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http 0.7.1",
  "tracing",
