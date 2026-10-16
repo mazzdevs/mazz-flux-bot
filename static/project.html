@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Project · mazz-flux-bot</title>
-  <link rel="stylesheet" href="/style.css?v=9">
+  <link rel="stylesheet" href="/style.css?v=10">
   <script>document.documentElement.dataset.theme=localStorage.getItem('mfb-theme')||'light';</script>
 </head>
 <body class="project-page">
@@ -41,6 +41,7 @@
       <section class="workspace-card"><details id="add-instance-disclosure"><summary>Add an instance</summary><p class="sub">Attach an existing instance, or configure a new one to provision when ready. Detach never stops or deletes an instance.</p><div id="add-instance" class="editor"></div></details></section>
     </div>
     <div id="project-panel-work" class="project-panel" role="tabpanel" aria-labelledby="project-tab-work" tabindex="0" hidden>
+      <section class="workspace-card"><div class="card-heading"><div><h2>Execution ownership</h2><p>Project tracking stays here. Flux owns native goal continuation; legacy data is retained, never inferred from descriptions.</p></div></div><div id="execution-mode" class="editor"></div><div id="native-execution" class="editor"></div></section>
       <section class="workspace-card"><div class="card-heading"><div><h2>Automation · primary only</h2><p>Direction and progress for the selected primary, separate from delivery status.</p></div></div><div id="automation" class="editor"></div></section>
       <div class="workspace-grid">
         <section class="workspace-card"><div class="card-heading"><div><h2>Kanban</h2><p>Work assigned through primary automation.</p></div></div><div id="kanban" class="editor task-grid"></div></section>
@@ -55,6 +56,6 @@
     </div>
   </main>
   <script src="/theme.js"></script>
-  <script src="/project.js?v=9"></script>
+  <script src="/project.js?v=10"></script>
 </body>
 </html>

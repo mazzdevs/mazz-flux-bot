@@ -1,5 +1,6 @@
 pub mod api;
 pub mod conductor;
+pub mod execution;
 pub mod heartbeat;
 pub mod launchdarkly;
 pub mod models;

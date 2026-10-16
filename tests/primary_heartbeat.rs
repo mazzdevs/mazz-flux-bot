@@ -95,6 +95,13 @@ async fn forced_tick_only_observes_and_messages_primary() {
         })
         .await
         .unwrap();
+    let p = s
+        .mutate_project(&p.id, p.tracking.revision, |p| {
+            p.tracking.execution_mode = ExecutionMode::LegacyConductor;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let mut r = Relationship::pending(&p, "Primary".into(), "empty".into(), None);
     r.vape_instance_id = Some("primary-a".into());
     s.add_relationship(&p.id, p.tracking.revision, r, true)
@@ -214,6 +221,13 @@ async fn forced_tick_only_observes_and_messages_primary() {
         })
         .await
         .unwrap();
+    let empty = s
+        .mutate_project(&empty.id, empty.tracking.revision, |p| {
+            p.tracking.execution_mode = ExecutionMode::LegacyConductor;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let empty_base = format!("http://127.0.0.1:{port}/api/v2/projects/{}", empty.id);
     let start = client
         .post(format!("{empty_base}/start"))
@@ -254,6 +268,13 @@ async fn forced_tick_only_observes_and_messages_primary() {
             heartbeat_prompt: None,
             constellation: Some("empty".into()),
             heartbeat_interval_secs: None,
+        })
+        .await
+        .unwrap();
+    let uncertain = s
+        .mutate_project(&uncertain.id, uncertain.tracking.revision, |p| {
+            p.tracking.execution_mode = ExecutionMode::LegacyConductor;
+            Ok(())
         })
         .await
         .unwrap();
@@ -318,6 +339,13 @@ async fn forced_tick_only_observes_and_messages_primary() {
             heartbeat_prompt: None,
             constellation: Some("invalid".into()),
             heartbeat_interval_secs: None,
+        })
+        .await
+        .unwrap();
+    let rejected = s
+        .mutate_project(&rejected.id, rejected.tracking.revision, |p| {
+            p.tracking.execution_mode = ExecutionMode::LegacyConductor;
+            Ok(())
         })
         .await
         .unwrap();

@@ -863,7 +863,41 @@ async fn process_project(
     if !forced && (!project.heartbeat_enabled || project.status != "running" || !is_due(&project)) {
         return Ok(project.tracking.revision);
     }
+    if project.tracking.execution_mode == crate::projects::ExecutionMode::NativeGoal {
+        let initialization = crate::execution::finish_initialization(state, &project).await?;
+        let observed = crate::execution::monitor(state, &project).await?;
+        state
+            .store
+            .touch_heartbeat(
+                &project.id,
+                Some(&format!(
+                    "{} Flux Goal Loop: {}. Monitoring only; no continuation or goal replay.",
+                    initialization.unwrap_or_default(),
+                    observed.state
+                )),
+            )
+            .await?;
+        return Ok(state
+            .store
+            .require_project(&project.id)
+            .await?
+            .tracking
+            .revision);
+    }
     let primary = crate::v2::ensure_primary(state, &project.id).await?;
+    if project.tracking.execution_mode == crate::projects::ExecutionMode::BootstrapOnly {
+        let outcome = crate::execution::bootstrap(state, &project, &primary).await?;
+        state
+            .store
+            .touch_heartbeat(&project.id, Some(&outcome.note))
+            .await?;
+        return Ok(state
+            .store
+            .require_project(&project.id)
+            .await?
+            .tracking
+            .revision);
+    }
     project.goal = crate::projects::effective_goal(&project, Some(&primary)).to_string();
     project.vape_instance_id = primary.vape_instance_id;
     project.heartbeat_prompt = primary

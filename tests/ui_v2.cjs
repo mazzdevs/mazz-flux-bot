@@ -9,7 +9,7 @@ const assert=require('node:assert/strict');
     const page=await browser.newPage({viewport:{width:1440,height:1000}});
     const calls=[],errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('dialog',dialog=>dialog.accept());
     const tasks=[{id:'task-one',title:'Implementation',description:'First task',status:'assigned'},{id:'task-two',title:'Review',description:'Second task',status:'assigned'}];
-    const project={id:'project-test',revision:1,schema_version:2,name:'UI verification',description:'Project context',goal:'Ship safely',heartbeat_prompt:null,constellation:'empty',status:'pending',archived_at:null,created_at:'2026-01-01',updated_at:'2026-01-01',original_jira_tickets:[],ec_tickets:[],vape_pages:[],launchdarkly_flags:[],additional_notes:[],primary_instance_relationship_id:'primary',automation:{status:'paused',heartbeat_enabled:false,heartbeat_interval_secs:900,last_note:'Paused for review',last_heartbeat_at:null},instances:[{id:'primary',project_id:'project-test',vape_instance_id:'primary-upstream',label:'Implementation',role:'worker',constellation:'empty',model:null,is_primary:true,goal_override:null,heartbeat_prompt_override:null,live:{status:'running',status_source:'live'}},{id:'related',project_id:'project-test',vape_instance_id:'related-upstream',label:'Review',role:'reviewer',constellation:'empty',model:null,is_primary:false,live:{status:'stopped',status_source:'live'}}]};
+    const project={id:'project-test',revision:1,schema_version:3,execution_mode:'legacy_conductor',name:'UI verification',description:'Project context',goal:'Ship safely',heartbeat_prompt:null,constellation:'empty',status:'pending',archived_at:null,created_at:'2026-01-01',updated_at:'2026-01-01',original_jira_tickets:[],ec_tickets:[],vape_pages:[],launchdarkly_flags:[],additional_notes:[],primary_instance_relationship_id:'primary',automation:{status:'paused',heartbeat_enabled:false,heartbeat_interval_secs:900,last_note:'Paused for review',last_heartbeat_at:null},instances:[{id:'primary',project_id:'project-test',vape_instance_id:'primary-upstream',label:'Implementation',role:'worker',constellation:'empty',model:null,is_primary:true,goal_override:null,heartbeat_prompt_override:null,live:{status:'running',status_source:'live'}},{id:'related',project_id:'project-test',vape_instance_id:'related-upstream',label:'Review',role:'reviewer',constellation:'empty',model:null,is_primary:false,live:{status:'stopped',status_source:'live'}}]};
     project.launchdarkly_flags=[{id:'flag-one',key:'pos.example.rollout',project_key:'default',environment_key:'production',fully_enabled_value:true,label:null,notes:null,status:{available:true,current_value:false,targeting_on:true,matches_fully_enabled:false,fetched_at:'2026-01-01T00:00:00Z',error:null}}];
     project.original_jira_tickets=[{id:'jira-one',url:'https://example.com/POS-123',key:'POS-123',label:'Original issue'}];
     await page.route('http://mfb.test/**',async route=>{
@@ -19,11 +19,11 @@ const assert=require('node:assert/strict');
         if(request.method()!=='GET'){
           const body=request.postDataJSON();calls.push({path:url.pathname,method:request.method(),body});
           if(url.pathname==='/api/v2/projects'&&request.method()==='POST'){
-            assert.equal(body.goal,'');assert.equal(body.heartbeat_prompt,undefined);
+            assert.equal(body.goal,undefined);assert.equal(body.heartbeat_prompt,undefined);
             return respond({project});
           }
           if(body.expected_revision!==project.revision)return respond({error:{code:'stale_revision',message:'Project changed since this draft'}},409);
-          if(request.method()==='PATCH'&&url.pathname==='/api/v2/projects/project-test'){
+          if(url.pathname.endsWith('/execution/mode')){project.execution_mode=body.execution_mode;}else if(request.method()==='PATCH'&&url.pathname==='/api/v2/projects/project-test'){
             Object.assign(project,body);delete project.expected_revision;
           }else if(url.pathname==='/api/v2/projects/project-test/notes'&&request.method()==='POST'){
             project.additional_notes.push({id:`note-${project.additional_notes.length+1}`,title:body.title,content:body.content,position:project.additional_notes.length});
@@ -38,6 +38,7 @@ const assert=require('node:assert/strict');
           project.revision++;return respond({ok:true,revision:project.revision});
         }
         if(url.pathname==='/api/v2/projects/project-test')return respond({project});
+        if(url.pathname.endsWith('/execution'))return respond({execution_mode:project.execution_mode,observation:{state:'no_goal',session_id:'session-ui',fetched_at:'now'},receipts:[]});
         if(url.pathname==='/api/v2/projects')return respond({projects:[project]});
         if(url.pathname.endsWith('/kanban'))return respond({board:{tasks}});
         if(url.pathname.endsWith('/activity-notes'))return respond({notes:[]});
@@ -216,14 +217,42 @@ const assert=require('node:assert/strict');
     }
     await page.getByRole('tab',{name:'Overview',exact:true}).click();
     await page.screenshot({path:path.join(__dirname,'../target/project-workspace-mobile.png')});
+    // Goal-free bootstrap and native mode expose different execution owners.
+    project.execution_mode='bootstrap_only';project.goal='';project.instances[0].goal_override=null;
+    await page.evaluate(()=>refresh());
+    assert.equal(await page.locator('[data-project-action=start]').isDisabled(),false);
+    assert.equal(await page.locator('#metadata textarea[name=goal]').count(),0);
+    await page.getByRole('tab',{name:'Work',exact:true}).click();
+    await page.locator('#execution-mode select').selectOption('native_goal');
+    await page.locator('#execution-mode button').click();
+    await page.waitForFunction(()=>document.querySelector('#native-execution textarea[name=condition]'));
+    await page.setViewportSize({width:1440,height:1000});
+    assert.equal(await page.locator('#native-execution textarea[name=condition]').isVisible(),true);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+    await page.setViewportSize({width:390,height:844});
+    assert.equal(await page.locator('#native-execution textarea[name=condition]').isVisible(),true);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+    assert.match(await page.locator('#native-execution').innerText(),/Clear removes the goal but does not abort/);
+    await page.locator('#native-execution textarea[name=condition]').fill('Tests pass without production changes');
+    await page.locator('#native-execution form button').click();
+    await page.waitForFunction(()=>document.querySelector('#notice').textContent.includes('activation pending'));
+    assert(calls.some(c=>c.path.endsWith('/execution/goals/start')&&c.body.condition==='Tests pass without production changes'&&c.body.expected_session_id==='session-ui'));
+    // The preceding save can still be completing refresh. Wait for the
+    // queued refresh to render the fixture change instead of assuming that
+    // refresh() waits when another refresh is already in flight.
+    project.automation.heartbeat_enabled=true;
+    await page.evaluate(()=>refresh());
+    await page.waitForFunction(()=>document.querySelector('[data-project-action=pause]')?.textContent==='Pause monitoring only');
+    assert.equal(await page.getByRole('button',{name:'Pause monitoring only',exact:true}).count(),1);
+    project.automation.heartbeat_enabled=false;
     await page.goto('http://mfb.test/');await page.locator('a.project-link').first().waitFor();
     assert.match(await page.locator('#projects-body').innerText(),/Review/);assert.deepEqual(errors,[]);
     await page.locator('#create-toggle').click();
-    assert.equal(await page.locator('#goal').getAttribute('required'),null);
+    assert.equal(await page.locator('#goal').count(),0);
     await page.locator('#constellation').fill('empty');
     await page.locator('#create-submit').click();
     await page.waitForFunction(()=>!document.querySelector('#create-dialog').open);
-    assert(calls.some(c=>c.path==='/api/v2/projects'&&c.body.goal===''));
-    console.log('PASS: tracking-only prerequisites, goal/add-instance shortcuts, clamped description, neutral archive/danger purge, desktop/mobile tabs, optional project prompts, dashboard, local note/task revision rebasing, dirty Kanban sibling deletion, true external conflicts, open disclosures/session content/keyboard focus across refresh; no browser errors');
+    assert(calls.some(c=>c.path==='/api/v2/projects'&&c.body.goal===undefined));
+    console.log('PASS: desktop/mobile execution modes and native controls, goal-free bootstrap, legacy prerequisites, goal/add-instance shortcuts, clamped description, neutral archive/danger purge, desktop/mobile tabs, optional project prompts, dashboard, local note/task revision rebasing, dirty Kanban sibling deletion, true external conflicts, open disclosures/session content/keyboard focus across refresh; no browser errors');
   } finally {await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1);});

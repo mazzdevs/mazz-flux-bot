@@ -114,7 +114,10 @@ impl Store {
         Ok(p)
     }
     fn pause_without_direction(p: &mut Project, all: &Relationships) {
-        if p.heartbeat_enabled && effective_goal(p, all.primary()).trim().is_empty() {
+        if p.tracking.execution_mode == ExecutionMode::LegacyConductor
+            && p.heartbeat_enabled
+            && effective_goal(p, all.primary()).trim().is_empty()
+        {
             p.heartbeat_enabled = false;
             p.status = "paused".into();
         }
@@ -152,6 +155,8 @@ impl Store {
             self.notes_dir(id),
             self.human_tasks_dir(id),
             self.root.join("user_notes").join(id),
+            self.root.join("executions").join(id),
+            self.root.join("bootstrap").join(id),
         ] {
             if fs::try_exists(&dir).await? {
                 fs::remove_dir_all(dir).await?;
@@ -386,6 +391,148 @@ impl Store {
         .await?;
         Ok(())
     }
+    pub async fn execution_receipts(
+        &self,
+        pid: &str,
+    ) -> Result<Vec<crate::execution::ExecutionReceipt>> {
+        validate_id(pid)?;
+        let mut rows: Vec<crate::execution::ExecutionReceipt> =
+            read_json_dir(&self.root.join("executions").join(pid).join("requests")).await?;
+        rows.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.request_id.cmp(&b.request_id))
+        });
+        Ok(rows)
+    }
+    pub async fn record_execution(
+        &self,
+        receipt: &crate::execution::ExecutionReceipt,
+    ) -> Result<()> {
+        let _lock = self.lock.lock().await;
+        validate_id(&receipt.project_id)?;
+        validate_id(&receipt.request_id)?;
+        let path = self
+            .root
+            .join("executions")
+            .join(&receipt.project_id)
+            .join("requests")
+            .join(format!("{}.json", receipt.request_id));
+        if fs::try_exists(&path).await? {
+            return Err(failure("conflict", "execution request already recorded"));
+        }
+        write_json(&path, receipt).await
+    }
+    pub async fn execution_observation(
+        &self,
+        pid: &str,
+        request: &str,
+    ) -> Result<Option<crate::execution::ExecutionProgress>> {
+        validate_id(pid)?;
+        validate_id(request)?;
+        read_json(
+            &self
+                .root
+                .join("executions")
+                .join(pid)
+                .join("observations")
+                .join(format!("{request}.json")),
+        )
+        .await
+    }
+    pub async fn save_execution_observation(
+        &self,
+        pid: &str,
+        request: &str,
+        progress: &crate::execution::ExecutionProgress,
+    ) -> Result<()> {
+        let _lock = self.lock.lock().await;
+        validate_id(pid)?;
+        validate_id(request)?;
+        write_json(
+            &self
+                .root
+                .join("executions")
+                .join(pid)
+                .join("observations")
+                .join(format!("{request}.json")),
+            progress,
+        )
+        .await
+    }
+    pub async fn initialization(
+        &self,
+        pid: &str,
+        rid: &str,
+    ) -> Result<Option<crate::execution::InitializationRecord>> {
+        validate_id(pid)?;
+        validate_id(rid)?;
+        read_json(
+            &self
+                .root
+                .join("bootstrap")
+                .join(pid)
+                .join("initialization")
+                .join(format!("{rid}.json")),
+        )
+        .await
+    }
+    pub async fn save_initialization(
+        &self,
+        record: &crate::execution::InitializationRecord,
+    ) -> Result<()> {
+        let _lock = self.lock.lock().await;
+        validate_id(&record.project_id)?;
+        validate_id(&record.relationship_id)?;
+        validate_id(&record.instance_id)?;
+        write_json(
+            &self
+                .root
+                .join("bootstrap")
+                .join(&record.project_id)
+                .join("initialization")
+                .join(format!("{}.json", record.relationship_id)),
+            record,
+        )
+        .await
+    }
+    pub async fn bootstrap_record(
+        &self,
+        pid: &str,
+        iid: &str,
+        session: &str,
+    ) -> Result<Option<crate::execution::BootstrapRecord>> {
+        validate_id(pid)?;
+        validate_id(iid)?;
+        validate_id(session)?;
+        read_json(
+            &self
+                .root
+                .join("bootstrap")
+                .join(pid)
+                .join(iid)
+                .join(format!("{session}.json")),
+        )
+        .await
+    }
+    pub async fn save_bootstrap(&self, record: &crate::execution::BootstrapRecord) -> Result<()> {
+        let _lock = self.lock.lock().await;
+        validate_id(&record.project_id)?;
+        validate_id(&record.relationship_id)?;
+        validate_id(&record.instance_id)?;
+        validate_id(&record.session_id)?;
+        write_json(
+            &self
+                .root
+                .join("bootstrap")
+                .join(&record.project_id)
+                .join(&record.instance_id)
+                .join(format!("{}.json", record.session_id)),
+            record,
+        )
+        .await
+    }
+
     /// Inventory both sides before writing. A resumed legacy migration must
     /// preserve the exact original target, never silently adopt other state.
     pub async fn migrate(&self, dry_run: bool) -> Result<MigrationReport> {
@@ -480,12 +627,13 @@ impl Store {
         }
         let mut pending = vec![];
         for (pid, (mut p, raw)) in projects {
-            let migrated = p.tracking.schema_version < 2;
+            let legacy_relationship = p.tracking.schema_version < 2;
+            let migrated = p.tracking.schema_version < 3;
             let existing = collections.remove(&pid);
             let result: Result<_> = async {
-                if !migrated && existing.is_none() { anyhow::bail!("v2 relationship collection is missing"); }
+                if !legacy_relationship && existing.is_none() { anyhow::bail!("v2 relationship collection is missing"); }
                 let mut all = existing.unwrap_or_else(||Relationships { project_id: pid.clone(), ..Default::default() });
-                if migrated {
+                if legacy_relationship {
                     if !all.instances.is_empty() {
                         if all.instances.len() != 1 || p.vape_instance_id.is_none() || all.primary().and_then(|r|r.vape_instance_id.as_ref()) != p.vape_instance_id.as_ref() {
                             anyhow::bail!("resumed relationship collection does not preserve the legacy primary instance");
@@ -502,7 +650,7 @@ impl Store {
                         all.primary_instance_relationship_id = Some(r.id.clone());all.instances.push(r);
                     } else if all.primary_instance_relationship_id.is_some() { anyhow::bail!("empty legacy project cannot have a resumed primary"); }
                 }
-                p.tracking.schema_version = 2;p.tracking.revision = p.tracking.revision.max(1);
+                p.tracking.schema_version = 3;p.tracking.revision = p.tracking.revision.max(1);
                 let after = serde_json::to_string_pretty(&p)?;
                 let record = MigrationRecord { project_id: pid.clone(), migrated, before_sha256:format!("{:x}",Sha256::digest(raw.as_bytes())), after_sha256:format!("{:x}",Sha256::digest(after.as_bytes())) };
                 Ok((p,all,record))

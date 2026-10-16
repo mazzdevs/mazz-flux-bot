@@ -340,6 +340,79 @@ impl VapeClient {
         .await
     }
 
+    pub async fn pida_commands(&self, id: &str) -> Result<serde_json::Value> {
+        self.get_json(&format!("/api/v1/instances/{id}/pida/api/commands"))
+            .await
+    }
+
+    /// Finite read of the initial replay, never an unbounded transcript stream.
+    pub async fn pida_goal_snapshot(&self, id: &str) -> Result<crate::execution::GoalObservation> {
+        let token = self.auth_token().await?;
+        let response = self
+            .http
+            .get(format!(
+                "{}/api/v1/instances/{id}/pida/api/stream?cursor=0",
+                self.base_url
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if !response.status().is_success()
+            || !response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|s| s.starts_with("text/event-stream"))
+        {
+            anyhow::bail!("native goal stream unavailable");
+        }
+        let mut response = response;
+        let mut bytes = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let limit =
+                deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(500));
+            match tokio::time::timeout_at(limit, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => {
+                    if bytes.len() + chunk.len() > 1_048_576 {
+                        anyhow::bail!("native snapshot exceeds read bound");
+                    }
+                    bytes.extend_from_slice(&chunk);
+                    if tokio::time::Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "native snapshot reached total read deadline; evidence incomplete"
+                        );
+                    }
+                }
+                Ok(Ok(None)) => break,
+                Err(_) if tokio::time::Instant::now() >= deadline => anyhow::bail!(
+                    "native snapshot reached total read deadline; evidence incomplete"
+                ),
+                Err(_) => break,
+                Ok(Err(_)) => anyhow::bail!("native snapshot interrupted"),
+            }
+        }
+        Ok(crate::execution::parse_snapshot(std::str::from_utf8(
+            &bytes,
+        )?))
+    }
+
+    /// Scope writes to the observed session, never a newly focused session.
+    pub async fn pida_session_send(
+        &self,
+        id: &str,
+        session: &str,
+        message: &str,
+    ) -> Result<serde_json::Value> {
+        crate::projects::validate_id(session)?;
+        self.mutate(
+            reqwest::Method::POST,
+            &format!("/api/v1/instances/{id}/pida/api/sessions/{session}/chat"),
+            Some(&serde_json::json!({"message":message})),
+        )
+        .await
+    }
+
     /// `POST .../pida/api/chat` — send a message into the instance's live pida
     /// session (steer it, answer a question in prose, etc).
     pub async fn pida_send(&self, id: &str, message: &str) -> Result<serde_json::Value> {

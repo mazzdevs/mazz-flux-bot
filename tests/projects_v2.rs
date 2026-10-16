@@ -23,12 +23,19 @@ fn dir() -> std::path::PathBuf {
     p
 }
 async fn project(s: &Store) -> Project {
-    s.create_project(CreateProjectRequest {
-        name: Some("test".into()),
-        goal: "deliver".into(),
-        heartbeat_prompt: None,
-        constellation: Some("empty".into()),
-        heartbeat_interval_secs: None,
+    let p = s
+        .create_project(CreateProjectRequest {
+            name: Some("test".into()),
+            goal: "deliver".into(),
+            heartbeat_prompt: None,
+            constellation: Some("empty".into()),
+            heartbeat_interval_secs: None,
+        })
+        .await
+        .unwrap();
+    s.mutate_project(&p.id, p.tracking.revision, |p| {
+        p.tracking.execution_mode = ExecutionMode::LegacyConductor;
+        Ok(())
     })
     .await
     .unwrap()
@@ -103,6 +110,7 @@ async fn migration_dry_run_preserves_legacy_and_apply_is_idempotent() {
     assert_eq!(p.heartbeat_interval_secs, 900);
     let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(after["status"], "pending");
+    assert_eq!(after["schema_version"], 3);
     assert_eq!(after["automation"]["status"], "blocked");
     assert!(after.get("vape_instance_id").is_none());
     assert!(!s.migrate(false).await.unwrap().records[0].migrated);
@@ -794,7 +802,7 @@ async fn detached_relationship_detail_is_not_found() {
 }
 
 #[tokio::test]
-async fn tracking_only_projects_allow_blank_goals_but_automation_requires_direction() {
+async fn legacy_conductor_preserves_direction_prerequisite_after_explicit_selection() {
     let (app, store, d) = app().await;
     let (_, contract) = call(&app, "GET", "/api/v2/openapi.json", None).await;
     assert!(
@@ -816,6 +824,9 @@ async fn tracking_only_projects_allow_blank_goals_but_automation_requires_direct
         assert_eq!(status, StatusCode::OK, "{created}");
         let pid = created["project"]["id"].as_str().unwrap();
         let base = format!("/api/v2/projects/{pid}");
+        let initial = store.require_project(pid).await.unwrap();
+        let (mode_status, _) = call(&app,"POST",&format!("{base}/execution/mode"),Some(json!({"expected_revision":initial.tracking.revision,"execution_mode":"legacy_conductor"}))).await;
+        assert_eq!(mode_status, StatusCode::OK);
         let p = store.require_project(pid).await.unwrap();
         assert!(p.goal.trim().is_empty());
         assert!(!p.heartbeat_enabled);
@@ -936,7 +947,7 @@ async fn tracking_only_projects_allow_blank_goals_but_automation_requires_direct
 }
 
 #[tokio::test]
-async fn clearing_effective_direction_pauses_automation_until_explicit_start() {
+async fn legacy_clearing_effective_direction_pauses_automation_until_explicit_start() {
     let (app, store, d) = app().await;
     for cleared_override in [Value::Null, json!("   ")] {
         let p = project(&store).await;
@@ -1061,7 +1072,7 @@ async fn clearing_effective_direction_pauses_automation_until_explicit_start() {
 }
 
 #[tokio::test]
-async fn store_direction_updates_preserve_the_tracking_only_boundary() {
+async fn legacy_store_direction_updates_preserve_the_tracking_only_boundary() {
     let d = dir();
     let store = Store::open(&d).await.unwrap();
     let p = project(&store).await;

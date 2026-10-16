@@ -8,6 +8,7 @@ use mazz_flux_bot::models::{
 #[test]
 fn job_config_model_field_serializes_when_present() {
     let req = CreateInstanceRequest {
+        model: None,
         name: "test-instance".to_string(),
         constellation: "back-office".to_string(),
         subdomain: None,
@@ -109,4 +110,20 @@ fn vape_instance_running_check_is_case_insensitive() {
     assert!(instance("running").is_running());
     assert!(!instance("Stopped").is_running());
     assert!(!instance("Starting").is_running());
+}
+
+#[test]
+fn bootstrap_create_uses_top_level_model_and_no_job() {
+    let req = CreateInstanceRequest {
+        model: Some("provider/model".into()),
+        name: "primary".into(),
+        constellation: "empty".into(),
+        subdomain: None,
+        ticket: None,
+        job: None,
+        labels: Default::default(),
+    };
+    let value = serde_json::to_value(req).unwrap();
+    assert_eq!(value["model"], "provider/model");
+    assert!(value.get("job").is_none());
 }
